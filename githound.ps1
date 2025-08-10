@@ -60,6 +60,49 @@ function New-GithubSession {
     }
 }
 
+function New-GithubAppSession {
+    [OutputType('GitHound.Session')] 
+    [CmdletBinding()]
+    Param(
+        [Parameter(Position=0, Mandatory = $true)]
+        [string]
+        $OrganizationName,
+
+        [Parameter(Position=1, Mandatory = $true)]
+        [string]
+        $ClientId,
+
+        [Parameter(Position=2, Mandatory = $false)]
+        [string]
+        $PrivateKeyPath = './priv.pem'
+    )
+
+    $header = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @{
+    alg = "RS256"
+    typ = "JWT"
+    }))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    $payload = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @{
+    iat = [System.DateTimeOffset]::UtcNow.AddSeconds(-30).ToUnixTimeSeconds()
+    exp = [System.DateTimeOffset]::UtcNow.AddMinutes(5).ToUnixTimeSeconds()
+    iss = $ClientId 
+    }))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    $rsa = [System.Security.Cryptography.RSA]::Create()
+    $rsa.ImportFromPem((Get-Content $PrivateKeyPath -Raw))
+
+    $signature = [Convert]::ToBase64String($rsa.SignData([System.Text.Encoding]::UTF8.GetBytes("$header.$payload"), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    $jwt = "$header.$payload.$signature"
+
+    $presession = New-GithubSession -OrganizationName $OrganizationName -Token $jwt 
+
+    $Installation = Invoke-GithubRestMethod -Session $presession -Path "app/installations" 
+    $AccessToken = Invoke-GithubRestMethod -Session $presession -Path "app/installations/$($Installation.id)/access_tokens" -Method 'POST'
+
+    New-GithubSession -OrganizationName $OrganizationName -Token $AccessToken.token 
+
+}
+
 function Invoke-GithubRestMethod {
     [CmdletBinding()]
     Param(
@@ -80,10 +123,10 @@ function Invoke-GithubRestMethod {
     try {
         do {
             if($LinkHeader) {
-                $Response = Invoke-WebRequest -Uri "$LinkHeader" -Headers $Session.Headers -Method Get -ErrorAction Stop
+                $Response = Invoke-WebRequest -Uri "$LinkHeader" -Headers $Session.Headers -Method $Method -ErrorAction Stop
             } else {
                 Write-Verbose "https://api.github.com/$($Path)"
-                $Response = Invoke-WebRequest -Uri "$($Session.Uri)$($Path)" -Headers $Session.Headers -Method Get -ErrorAction Stop
+                $Response = Invoke-WebRequest -Uri "$($Session.Uri)$($Path)" -Headers $Session.Headers -Method $Method -ErrorAction Stop
             }
 
             $Response.Content | ConvertFrom-Json | ForEach-Object { $_ }
@@ -114,6 +157,45 @@ function Get-Headers
 
     $headers = @{'Authorization' = "Bearer $($GitHubPat)" }
     return $headers
+}
+
+function Invoke-GraphRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Uri,
+        [string]$Method = "GET",
+        [hashtable]$Headers = @{},
+        [object]$Body = $null
+    )
+    
+    $requestHeaders = @{
+        "Authorization" = "Bearer $accessToken"
+        "Content-Type" = "application/json"
+    }
+    
+    foreach ($key in $Headers.Keys) {
+        $requestHeaders[$key] = $Headers[$key]
+    }
+    
+    try {
+        $params = @{
+            Uri = $Uri
+            Method = $Method
+            Headers = $requestHeaders
+        }
+        
+        if ($Body) {
+            $params.Body = $Body | ConvertTo-Json -Depth 10
+        }
+        
+        $response = Invoke-RestMethod @params
+        return $response
+    }
+    catch {
+        Write-Warning "HTTP request failed for $Uri : $($_.Exception.Message)"
+        throw
+    }
 }
 
 function Invoke-GitHubGraphQL
@@ -558,6 +640,136 @@ function Git-HoundBranch
                     # Here we just set all of the protection properties to false
 
                 }
+                if ($branch.protected) {
+                    try {
+                        $Protections = Invoke-GithubRestMethod -Session $Session -Path "repos/$($repo.Properties.full_name)/rules/branches/$($branch.name)"
+                        
+                        $aggregatedRules = @{
+                            pull_request = @()
+                            deletion = @()
+                            non_fast_forward = @()
+                            required_signatures = @()
+                            code_scanning = @()
+                            other = @()
+                        }
+                        
+                        $uniqueRulesets = @{}
+                        
+
+                        foreach ($rule in $Protections) {
+                            $rulesetId = $rule.ruleset_id
+                            $ruleType = $rule.type
+                            
+                            if (-not $uniqueRulesets.ContainsKey($rulesetId)) {
+                                $uniqueRulesets[$rulesetId] = @{
+                                    source = $rule.ruleset_source
+                                    source_type = $rule.ruleset_source_type
+                                    rules = @()
+                                }
+                            }
+                            $uniqueRulesets[$rulesetId].rules += $rule
+                            
+                            if ($aggregatedRules.ContainsKey($ruleType)) {
+                                $aggregatedRules[$ruleType] += $rule
+                            } else {
+                                $aggregatedRules['other'] += $rule
+                            }
+                        }
+                        
+                        if ($aggregatedRules['pull_request'].Count -gt 0) {
+                            
+                            $maxRequiredReviews = 0
+                            $requireCodeOwnerReview = $false
+                            $requireLastPushApproval = $false
+                            
+                            foreach ($prRule in $aggregatedRules['pull_request']) {
+                                
+                                if ($prRule.parameters) {
+                                    if ($prRule.parameters.required_approving_review_count -gt $maxRequiredReviews) {
+                                        $maxRequiredReviews = $prRule.parameters.required_approving_review_count
+                                    }
+                                    
+                                    if ($prRule.parameters.require_code_owner_review -eq $true) {
+                                        $requireCodeOwnerReview = $true
+                                    }
+                                    
+                                    if ($prRule.parameters.require_last_push_approval -eq $true) {
+                                        $requireLastPushApproval = $true
+                                    }
+                                    
+                                }
+                            }
+                            
+                            if ($branch.protection.enabled -and $Protections.required_pull_request_reviews) {
+
+                                if ($maxRequiredReviews -gt 0){
+                                    $BranchProtectionProperties["protection_required_pull_request_reviews"] = $true
+                                }
+                                if ($maxRequiredReviews -gt $Protections.required_pull_request_reviews.required_approving_review_count){
+                                    $BranchProtectionProperties["protection_required_approving_review_count"] = $maxRequiredReviews
+                                }
+                                if ($requireCodeOwnerReview -and $maxRequiredReviews -gt 0){
+                                    $BranchProtectionProperties["protection_required_pull_request_reviews"] = $true
+                                    $BranchProtectionProperties["protection_require_code_owner_review"] = $requireCodeOwnerReview
+                                }
+                                if ($requireLastPushApproval){
+                                    $BranchProtectionProperties["protection_required_pull_request_reviews"] = $true
+                                    $BranchProtectionProperties["protection_require_last_push_approval"] = $requireLastPushApproval
+                                }
+
+                            } else {
+
+                                $BranchProtectionProperties["protection_required_pull_request_reviews"] = $false
+                                
+                                if ($maxRequiredReviews -gt 0){
+                                    $BranchProtectionProperties["protection_required_pull_request_reviews"] = $true
+                                    $BranchProtectionProperties["protection_required_approving_review_count"] = $maxRequiredReviews
+                                }
+                                else {
+                                    $BranchProtectionProperties["protection_required_approving_review_count"] = 0
+                                }
+                                if ($requireCodeOwnerReview -and $maxRequiredReviews -gt 0){
+                                    $BranchProtectionProperties["protection_required_pull_request_reviews"] = $true
+                                    $BranchProtectionProperties["protection_require_code_owner_review"] = $requireCodeOwnerReview                                    
+                                }
+                                else {
+                                    $BranchProtectionProperties["protection_require_code_owner_review"] = $false
+                                }
+                                
+                                if ($requireLastPushApproval){
+                                    $BranchProtectionProperties["protection_required_pull_request_reviews"] = $true
+                                    $BranchProtectionProperties["protection_require_last_push_approval"] = $requireLastPushApproval
+                                }
+                                else {
+                                    $BranchProtectionProperties["protection_require_last_push_approval"] = $false
+                                }
+                            }
+
+                        }
+
+                        else {
+                            $BranchProtectionProperties["protection_required_pull_request_reviews"] = $false
+                        }
+                        
+                        if ($aggregatedRules['deletion'].Count -gt 0) {
+                            $BranchProtectionProperties["protection_restrict_deletions"] = $true
+                        }
+                                               
+                        if ($aggregatedRules['required_signatures'].Count -gt 0) {
+                            $BranchProtectionProperties["protection_required_signed_commits"] = $true
+                        }
+                        
+                        if ($aggregatedRules['code_scanning'].Count -gt 0) {
+                            $BranchProtectionProperties["protection_code_scanning"] = $true
+                        }
+
+                        
+                    } catch {
+                        Write-Warning "Failed to fetch branch rules for '$($branch.name)': $_"
+                    }
+                }
+
+                $branchHash = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($repo.properties.organization_name)+$($repo.properties.full_name)+$($branch.name)"))) -replace '-', ''
 
                 $props = [pscustomobject]@{
                     organization    = Normalize-Null $repo.properties.organization_name
@@ -573,8 +785,8 @@ function Git-HoundBranch
                 #    $props | Add-Member -MemberType NoteProperty -Name $BranchProtectionProperty.Key -Value $BranchProtectionProperty.Value
                 #}
 
-                $null = $nodes.Add((New-GitHoundNode -Id $branch.commit.sha -Kind GHBranch -Properties $props))
-                $null = $edges.Add((New-GitHoundEdge -Kind GHHasBranch -StartId $repo.id -EndId $branch.commit.sha))
+                $null = $nodes.Add((New-GitHoundNode -Id $branchHash -Kind GHBranch -Properties $props))
+                $null = $edges.Add((New-GitHoundEdge -Kind GHHasBranch -StartId $repo.id -EndId $branchHash))
             }
         } -ThrottleLimit 25
     }
@@ -586,6 +798,135 @@ function Git-HoundBranch
             Edges = $edges
         }
     
+        Write-Output $output
+    }
+}
+
+function Git-HoundEnvironment {
+    [CmdletBinding()]
+    Param(
+        [Parameter(Position = 0, Mandatory = $true)]
+        [PSTypeName('GitHound.Session')]
+        $Session,
+
+        [Parameter(Position = 1, Mandatory = $true, ValueFromPipeline = $true)]
+        [PSObject]
+        $Repository
+    )
+
+    begin {
+        $nodes = New-Object System.Collections.ArrayList
+        $edges = New-Object System.Collections.ArrayList
+    }
+
+    process {
+        foreach ($repo in $Repository.nodes) {
+            try {
+                Write-Verbose "Fetching environments for repository: $($repo.properties.full_name)"
+                
+                # Fetch environments for the specific repository
+                $environmentsResponse = Invoke-GithubRestMethod -Session $Session -Path "repos/$($repo.properties.full_name)/environments"
+                
+                if ($environmentsResponse.environments) {
+                    foreach ($env in $environmentsResponse.environments) {
+                        # Initialize security properties
+                        $hasWaitTimer = $false
+                        $waitTimerMinutes = 0
+                        $hasRequiredReviewers = $false
+                        $preventSelfReview = $false
+                        $reviewerCount = 0
+                        $userReviewerCount = 0
+                        $teamReviewerCount = 0
+                        $hasBranchPolicy = $false
+                        $protectedBranches = $false
+                        $customBranchPolicies = $false
+                        $protectionRuleCount = 0
+
+                        # Process protection rules for security analysis
+                        if ($env.protection_rules) {
+                            $protectionRuleCount = $env.protection_rules.Count
+                            
+                            foreach ($rule in $env.protection_rules) {
+                                switch ($rule.type) {
+                                    "wait_timer" {
+                                        $hasWaitTimer = $true
+                                        $waitTimerMinutes = $rule.wait_timer
+                                    }
+                                    "required_reviewers" {
+                                        $hasRequiredReviewers = $true
+                                        $preventSelfReview = $rule.prevent_self_review
+                                        
+                                        if ($rule.reviewers) {
+                                            $reviewerCount = $rule.reviewers.Count
+                                            $userReviewerCount = ($rule.reviewers | Where-Object { $_.type -eq "User" }).Count
+                                            $teamReviewerCount = ($rule.reviewers | Where-Object { $_.type -eq "Team" }).Count
+                                        }
+                                    }
+                                    "branch_policy" {
+                                        $hasBranchPolicy = $true
+                                    }
+                                }
+                            }
+                        }
+
+                        # Process deployment branch policy
+                        if ($env.deployment_branch_policy) {
+                            $protectedBranches = $env.deployment_branch_policy.protected_branches
+                            $customBranchPolicies = $env.deployment_branch_policy.custom_branch_policies
+                        }
+
+                        # Create environment node with security properties
+                        $envProps = [pscustomobject]@{
+                            id = Normalize-Null $env.id
+                            node_id = Normalize-Null $env.node_id
+                            name = Normalize-Null $env.name
+                            url = Normalize-Null $env.url
+                            html_url = Normalize-Null $env.html_url
+                            repository_name = Normalize-Null $repo.properties.name
+                            repository_full_name = Normalize-Null $repo.properties.full_name
+                            repository_id = Normalize-Null $repo.properties.id
+                            created_at = Normalize-Null $env.created_at
+                            updated_at = Normalize-Null $env.updated_at
+                            
+                            # Security-relevant properties
+                            protection_rule_count = $protectionRuleCount
+                            has_wait_timer = $hasWaitTimer
+                            wait_timer_minutes = $waitTimerMinutes
+                            has_required_reviewers = $hasRequiredReviewers
+                            prevent_self_review = $preventSelfReview
+                            reviewer_count = $reviewerCount
+                            user_reviewer_count = $userReviewerCount
+                            team_reviewer_count = $teamReviewerCount
+                            has_branch_policy = $hasBranchPolicy
+                            protected_branches_only = $protectedBranches
+                            custom_branch_policies = $customBranchPolicies
+                                   
+                        }
+
+                        $null = $nodes.Add((New-GitHoundNode -Id $env.node_id -Kind 'GHEnvironment' -Properties $envProps))
+                        
+                        # Create edge from repository to environment (only this edge type)
+                        $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasEnvironment' -StartId $repo.id -EndId $env.node_id))
+
+                    }
+                }
+                else {
+                    Write-Verbose "No environments found for repository: $($repo.properties.full_name)"
+                }
+            }
+            catch {
+                Write-Warning "Failed to fetch environments for repository '$($repo.properties.full_name)': $($_.Exception.Message)"
+                continue
+            }
+        }
+    }
+
+    end {
+        $output = [PSCustomObject]@{
+            Nodes = $nodes
+            Edges = $edges
+        }
+
         Write-Output $output
     }
 }
@@ -1214,6 +1555,324 @@ query SAML($login: String!, $count: Int = 100, $after: String = null) {
     Write-Output $edges
 }
 
+function Git-HoundAppRegs {
+    Write-Host "Fetching application registrations..." -ForegroundColor Green
+    $allApps = @()
+    $uri = "https://graph.microsoft.com/v1.0/applications?`$top=30"
+    
+    do {
+        try {
+            $response = Invoke-GraphRequest -Uri $uri
+            $allApps += $response.value
+            $uri = $response.'@odata.nextLink'
+            
+            # Rate limiting
+            Start-Sleep -Milliseconds 1000
+
+        }
+        catch {
+            Write-Error "Failed to fetch applications: $($_.Exception.Message)"
+            break
+        }
+    } while ($uri)
+    
+    Write-Host "Found $($allApps.Count) application registrations" -ForegroundColor Yellow
+    return $allApps
+}
+
+function Git-HoundFederatedCredentials {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$AppId
+    )
+    
+    try {
+        $uri = "https://graph.microsoft.com/v1.0/applications/$AppId/federatedIdentityCredentials"
+        $response = Invoke-GraphRequest -Uri $uri
+        return $response.value
+    }
+    catch {
+        if ($_.Exception.Message -like "*404*" -or $_.Exception.Message -like "*NotFound*") {
+            return @()
+        }
+        Write-Warning "Error fetching federated credentials for app $AppId : $($_.Exception.Message)"
+        return @()
+    }
+}
+
+function Git-HoundFederationSubjectInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Subject
+    )
+        
+    $result = @{
+        Organization = "Unknown"
+        Repository = "Unknown"
+        Type = "Others"
+        Details = $Subject
+        FullSubject = $Subject
+    }
+    
+    if ($Subject -match "^repo:([^/]+)/([^:]+):(.+)$") {
+        $result.Organization = $Matches[1]
+        $result.Repository = $Matches[2]
+        $remainder = $Matches[3]
+        
+        if ($remainder -match "^environment:(.+)") {
+            $result.Type = "Environment"
+            $result.Details = $Matches[1]
+        }
+        elseif ($remainder -match "^ref:refs/heads/(.+)") {
+            $result.Type = "Branch"
+            $result.Details = $Matches[1]
+        }
+        else {
+            $result.Type = "Others"
+            $result.Details = $remainder
+        }
+    }
+    
+    return $result
+}
+
+function Git-HoundFederation {
+    [CmdletBinding()]
+    Param(
+        [Parameter(Position = 0, Mandatory = $true)]
+        [PSObject]
+        $Organization,
+
+        [Parameter(Position = 1, Mandatory = $true)]
+        [PSObject]
+        $Repository,
+
+        [Parameter(Position = 2, Mandatory = $true)]
+        [PSObject]
+        $Branches,
+
+        [Parameter(Position = 3, Mandatory = $true)]
+        [PSObject]
+        $Environments
+    )
+
+    $nodes = New-Object System.Collections.ArrayList
+    $edges = New-Object System.Collections.ArrayList
+
+    Write-Host "Getting access token from Azure CLI..." -ForegroundColor Green
+    $accessToken = az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv
+
+    if (-not $accessToken) {
+        throw "Failed to get access token. Please run 'az login' first."
+    }
+
+    try {
+        $allAppRegs = Git-HoundAppRegs
+        $githubApps = @()
+
+        Write-Host "Processing application registrations for GitHub Actions credentials..." -ForegroundColor Green
+
+        foreach ($app in $allAppRegs) {
+            Write-Host "Processing: $($app.displayName) ($($app.id))" -ForegroundColor Cyan
+            
+            $fedCreds = Git-HoundFederatedCredentials -AppId $app.id
+            
+            $githubCreds = $fedCreds | Where-Object { $_.issuer -eq "https://token.actions.githubusercontent.com" }
+            
+            if ($githubCreds) {
+                # Process each GitHub credential
+                foreach ($cred in $githubCreds) {
+                    $subjectInfo = Git-HoundFederationSubjectInfo -Subject $cred.subject
+                    
+                    # Only process credentials for the current organization
+                    if ($subjectInfo.Organization -eq $Organization.properties.login) {
+                        
+                        # Find matching repository
+                        $matchingRepo = $Repository.nodes | Where-Object { 
+                            $_.properties.name -eq $subjectInfo.Repository 
+                        }
+                        
+                        if ($matchingRepo) {
+                            Write-Host "Found matching repository: $($subjectInfo.Repository)" -ForegroundColor Green
+                            
+                            if ($subjectInfo.Type -eq "Branch") {
+                                # Look for matching branch
+                                $branchHash = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($subjectInfo.Organization)+$($matchingRepo.properties.full_name)+$($subjectInfo.Details)"))) -replace '-', ''
+                                
+                                $matchingBranch = $Branches.nodes | Where-Object { 
+                                    $_.id -eq $branchHash
+                                }
+                                
+                                if ($matchingBranch) {
+                                    Write-Host "Found matching branch: $($subjectInfo.Details)" -ForegroundColor Green
+                                    # Create edge between branch and app
+                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $branchHash -EndId $app.id))
+                                } else {
+                                    Write-Host "Creating shadow branch: $($subjectInfo.Details)" -ForegroundColor Yellow
+                                    # Create shadow branch node
+                                    $shadowBranchProps = [pscustomobject]@{
+                                        organization = $subjectInfo.Organization
+                                        organization_id = $Organization.properties.node_id
+                                        short_name = $subjectInfo.Details
+                                        name = "$($subjectInfo.Repository)\$($subjectInfo.Details)"
+                                        protected = $null
+                                        shadow = $true
+                                        federation_subject = $cred.subject
+                                    }
+                                    $null = $nodes.Add((New-GitHoundNode -Id $branchHash -Kind 'ShadowBranch' -Properties $shadowBranchProps))
+                                    
+                                    # Create edge between repository and shadow branch
+                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasBranch' -StartId $matchingRepo.id -EndId $branchHash))
+                                    
+                                    # Create edge between shadow branch and app
+                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $branchHash -EndId $app.id))
+                                }
+                            } elseif ($subjectInfo.Type -eq "Environment") {
+                                # Look for matching environment
+                                $matchingEnvironment = $Environments.nodes | Where-Object { 
+                                    $_.properties.name -eq $subjectInfo.Details -and 
+                                    $_.properties.repository_name -eq $subjectInfo.Repository
+                                }
+                                
+                                if ($matchingEnvironment) {
+                                    Write-Host "Found matching environment: $($subjectInfo.Details)" -ForegroundColor Green
+                                    # Create edge between environment and app
+                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $matchingEnvironment.id -EndId $app.id))
+                                } else {
+                                    Write-Host "Creating shadow environment: $($subjectInfo.Details)" -ForegroundColor Yellow
+                                    
+                                    # Create shadow environment node
+                                    $shadowEnvId = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($subjectInfo.Organization)+$($subjectInfo.Repository)+env+$($subjectInfo.Details)"))) -replace '-', ''
+                                    
+                                    $shadowEnvProps = [pscustomobject]@{
+                                        id = $shadowEnvId
+                                        name = $subjectInfo.Details
+                                        repository_name = $subjectInfo.Repository
+                                        repository_full_name = "$($subjectInfo.Organization)/$($subjectInfo.Repository)"
+                                        organization_name = $subjectInfo.Organization
+                                        organization_id = $Organization.properties.node_id
+                                        shadow = $true
+                                        federation_subject = $cred.subject
+                                    }
+                                    $null = $nodes.Add((New-GitHoundNode -Id $shadowEnvId -Kind 'ShadowEnvironment' -Properties $shadowEnvProps))
+                                    
+                                    # Create edge between repository and shadow environment
+                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasEnvironment' -StartId $matchingRepo.id -EndId $shadowEnvId))
+                                    
+                                    # Create edge between shadow environment and app
+                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowEnvId -EndId $app.id))
+                                }
+                            } else {
+                                # For other subjects, create edge to repository
+                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $matchingRepo.id -EndId $app.id))
+                            }
+                        } else {
+                            Write-Host "Creating shadow repository: $($subjectInfo.Repository)" -ForegroundColor Yellow
+                            
+                            # Create shadow repository node
+                            $shadowRepoId = [System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($subjectInfo.Organization)+$($subjectInfo.Repository)"))
+                            $shadowRepoHash = [System.BitConverter]::ToString($shadowRepoId) -replace '-', ''
+                            
+                            $shadowRepoProps = [pscustomobject]@{
+                                id = $shadowRepoHash
+                                organization_name = $subjectInfo.Organization
+                                organization_id = $Organization.properties.node_id
+                                name = $subjectInfo.Repository
+                                full_name = "$($subjectInfo.Organization)/$($subjectInfo.Repository)"
+                                shadow = $true
+                                federation_subject = $cred.subject
+                            }
+                            $null = $nodes.Add((New-GitHoundNode -Id $shadowRepoHash -Kind 'ShadowRepository' -Properties $shadowRepoProps))
+                            
+                            # Create edge between organization and shadow repository
+                            $null = $edges.Add((New-GitHoundEdge -Kind 'GHOwns' -StartId $Organization.properties.node_id -EndId $shadowRepoHash))
+                            
+                            if ($subjectInfo.Type -eq "Branch") {
+                                # Create shadow branch node
+                                $branchHash = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($subjectInfo.Organization)+$($subjectInfo.Organization)/$($subjectInfo.Repository)+$($subjectInfo.Details)"))) -replace '-', ''
+                                
+                                $shadowBranchProps = [pscustomobject]@{
+                                    organization = $subjectInfo.Organization
+                                    organization_id = $Organization.properties.node_id
+                                    short_name = $subjectInfo.Details
+                                    name = "$($subjectInfo.Repository)\$($subjectInfo.Details)"
+                                    protected = $null
+                                    shadow = $true
+                                    federation_subject = $cred.subject
+                                }
+                                $null = $nodes.Add((New-GitHoundNode -Id $branchHash -Kind 'ShadowBranch' -Properties $shadowBranchProps))
+                                
+                                # Create edge between shadow repository and shadow branch
+                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasBranch' -StartId $shadowRepoHash -EndId $branchHash))
+                                
+                                # Create edge between shadow branch and app
+                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $branchHash -EndId $app.id))
+                            } elseif ($subjectInfo.Type -eq "Environment") {
+                                # Create shadow environment node
+                                $shadowEnvId = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($subjectInfo.Organization)+$($subjectInfo.Repository)+env+$($subjectInfo.Details)"))) -replace '-', ''
+                                
+                                $shadowEnvProps = [pscustomobject]@{
+                                    id = $shadowEnvId
+                                    name = $subjectInfo.Details
+                                    repository_name = $subjectInfo.Repository
+                                    repository_full_name = "$($subjectInfo.Organization)/$($subjectInfo.Repository)"
+                                    organization_name = $subjectInfo.Organization
+                                    organization_id = $Organization.properties.node_id
+                                    shadow = $true
+                                    federation_subject = $cred.subject
+                                }
+                                $null = $nodes.Add((New-GitHoundNode -Id $shadowEnvId -Kind 'ShadowEnvironment' -Properties $shadowEnvProps))
+                                
+                                # Create edge between shadow repository and shadow environment
+                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasEnvironment' -StartId $shadowRepoHash -EndId $shadowEnvId))
+                                
+                                # Create edge between shadow environment and app
+                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowEnvId -EndId $app.id))
+                            } else {
+                                # For other subjects, create edge to shadow repository
+                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowRepoHash -EndId $app.id))
+                            }
+                        }
+                    }
+                }
+                
+                $appInfo = [PSCustomObject]@{
+                    AppRegistrationId = $app.id
+                    DisplayName = $app.displayName
+                    GitHubSubjects = $githubCreds.subject
+                    CreatedDateTime = $app.createdDateTime
+                }
+                $githubApps += $appInfo
+            }
+            
+            # Rate limiting
+            Start-Sleep -Milliseconds 500
+        }
+
+        # Display summary
+        Write-Host "`nSUMMARY:" -ForegroundColor Magenta
+        Write-Host "Total App Registrations processed: $($allAppRegs.Count)" -ForegroundColor White
+        Write-Host "App Registrations with GitHub Actions credentials: $($githubApps.Count)" -ForegroundColor White
+        Write-Host "Nodes created: $($nodes.Count)" -ForegroundColor White
+        Write-Host "Edges created: $($edges.Count)" -ForegroundColor White
+    }
+    catch {
+        Write-Error "Script execution failed: $($_.Exception.Message)"
+        throw
+    }
+
+    # Return the graph structure
+    $output = [PSCustomObject]@{
+        Nodes = $nodes
+        Edges = $edges
+    }
+
+    Write-Output $output
+    Write-Host "`nFederation analysis completed successfully!" -ForegroundColor Green
+}
+
 function Invoke-GitHound
 {
     [CmdletBinding()]
@@ -1230,14 +1889,14 @@ function Invoke-GitHound
     $org = Git-HoundOrganization -Session $Session
     $nodes.Add($org) | Out-Null
 
-    Write-Host "[*] Enumerating Organization Users"
-    $users = $org | Git-HoundUser -Session $Session
-    if($users) { $nodes.AddRange(@($users)) }
+    # Write-Host "[*] Enumerating Organization Users"
+    # $users = $org | Git-HoundUser -Session $Session
+    # if($users) { $nodes.AddRange(@($users)) }
 
-    Write-Host "[*] Enumerating Organization Teams"
-    $teams = $org | Git-HoundTeam -Session $Session
-    if($teams.nodes) { $nodes.AddRange(@($teams.nodes)) }
-    if($teams.edges) { $edges.AddRange(@($teams.edges)) }
+    # Write-Host "[*] Enumerating Organization Teams"
+    # $teams = $org | Git-HoundTeam -Session $Session
+    # if($teams.nodes) { $nodes.AddRange(@($teams.nodes)) }
+    # if($teams.edges) { $edges.AddRange(@($teams.edges)) }
 
     Write-Host "[*] Enumerating Organization Repositories"
     $repos = $org | Git-HoundRepository -Session $Session
@@ -1249,29 +1908,41 @@ function Invoke-GitHound
     if($branches.nodes) { $nodes.AddRange(@($branches.nodes)) }
     if($branches.edges) { $edges.AddRange(@($branches.edges)) }
 
-    Write-Host "[*] Enumerating Team Roles"
-    $teamroles = $org | Git-HoundTeamRole -Session $Session
-    if($teamroles.nodes) { $nodes.AddRange(@($teamroles.nodes)) }
-    if($teamroles.edges) { $edges.AddRange(@($teamroles.edges)) }
+    Write-Host "[*] Enumerating Organization Environments"
+    $environments = $repos | Git-HoundEnvironment -Session $Session
+    if($environments.nodes) { $nodes.AddRange(@($environments.nodes)) }
+    if($environments.edges) { $edges.AddRange(@($environments.edges)) }
 
-    Write-Host "[*] Enumerating Organization Roles"
-    $orgroles = $org | Git-HoundOrganizationRole -Session $Session
-    if($orgroles.nodes) { $nodes.AddRange(@($orgroles.nodes)) }
-    if($orgroles.edges) { $edges.AddRange(@($orgroles.edges)) }
+    Write-Host "[*] Enumerating Azure Federation"
+    if($EnableFederation){
+    $federation = Git-HoundFederation -Organization $org -Repository $repos -Branches $branches -Environments $environments
+    if($federation.nodes) { $nodes.AddRange(@($federation.nodes)) }
+    if($federation.edges) { $edges.AddRange(@($federation.edges)) }
+    }
+        
+    # Write-Host "[*] Enumerating Team Roles"
+    # $teamroles = $org | Git-HoundTeamRole -Session $Session
+    # if($teamroles.nodes) { $nodes.AddRange(@($teamroles.nodes)) }
+    # if($teamroles.edges) { $edges.AddRange(@($teamroles.edges)) }
 
-    Write-Host "[*] Enumerating Repository Roles"
-    $reporoles = $org | Git-HoundRepositoryRole -Session $Session
-    if($reporoles.nodes) { $nodes.AddRange(@($reporoles.nodes)) }
-    if($reporoles.edges) { $edges.AddRange(@($reporoles.edges)) }
+    # Write-Host "[*] Enumerating Organization Roles"
+    # $orgroles = $org | Git-HoundOrganizationRole -Session $Session
+    # if($orgroles.nodes) { $nodes.AddRange(@($orgroles.nodes)) }
+    # if($orgroles.edges) { $edges.AddRange(@($orgroles.edges)) }
+
+    # Write-Host "[*] Enumerating Repository Roles"
+    # $reporoles = $org | Git-HoundRepositoryRole -Session $Session
+    # if($reporoles.nodes) { $nodes.AddRange(@($reporoles.nodes)) }
+    # if($reporoles.edges) { $edges.AddRange(@($reporoles.edges)) }
     
-    Write-Host "[*] Enumerating Secret Scanning Alerts"
-    $secretalerts = $org | Git-HoundSecretScanningAlert -Session $Session
-    if($secretalerts.nodes) { $nodes.AddRange(@($secretalerts.nodes)) }
-    if($secretalerts.edges) { $edges.AddRange(@($secretalerts.edges)) }
+    # Write-Host "[*] Enumerating Secret Scanning Alerts"
+    # $secretalerts = $org | Git-HoundSecretScanningAlert -Session $Session
+    # if($secretalerts.nodes) { $nodes.AddRange(@($secretalerts.nodes)) }
+    # if($secretalerts.edges) { $edges.AddRange(@($secretalerts.edges)) }
 
-    Write-Host "[*] Enumerating SAML Identity Provider"
-    $saml = Git-HoundGraphQlSamlProvider -Session $Session
-    if($saml) { $edges.AddRange(@($saml)) }
+    # Write-Host "[*] Enumerating SAML Identity Provider"
+    # $saml = Git-HoundGraphQlSamlProvider -Session $Session
+    # if($saml) { $edges.AddRange(@($saml)) }
 
     Write-Host "[*] Converting to OpenGraph JSON Payload"
     $payload = [PSCustomObject]@{
