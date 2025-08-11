@@ -458,8 +458,12 @@ function Git-HoundRepository
     $nodes = New-Object System.Collections.ArrayList
     $edges = New-Object System.Collections.ArrayList
 
-    foreach($repo in (Invoke-GithubRestMethod -Session $Session -Path "orgs/$($Organization.Properties.login)/repos"))
-    {
+    $targetRepoName = "csirt-playground"  # Replace with your actual repository name
+
+    $repo = Invoke-GithubRestMethod -Session $Session -Path "repos/$($Organization.Properties.login)/$targetRepoName"
+
+#    foreach($repo in (Invoke-GithubRestMethod -Session $Session -Path "orgs/$($Organization.Properties.login)/repos"))
+#   {
         $properties = @{
             id                          = Normalize-Null $repo.id
             node_id                     = Normalize-Null $repo.node_id
@@ -490,7 +494,7 @@ function Git-HoundRepository
         }
         $null = $nodes.Add((New-GitHoundNode -Id $repo.node_id -Kind 'GHRepository' -Properties $properties))
         $null = $edges.Add((New-GitHoundEdge -Kind 'GHOwns' -StartId $repo.owner.node_id -EndId $repo.node_id))
-    }
+    #}
 
     $output = [PSCustomObject]@{
         Nodes = $nodes
@@ -1913,12 +1917,12 @@ function Invoke-GitHound
     if($environments.nodes) { $nodes.AddRange(@($environments.nodes)) }
     if($environments.edges) { $edges.AddRange(@($environments.edges)) }
 
-    Write-Host "[*] Enumerating Azure Federation"
-    if($EnableFederation){
-    $federation = Git-HoundFederation -Organization $org -Repository $repos -Branches $branches -Environments $environments
-    if($federation.nodes) { $nodes.AddRange(@($federation.nodes)) }
-    if($federation.edges) { $edges.AddRange(@($federation.edges)) }
-    }
+    # Write-Host "[*] Enumerating Azure Federation"
+    # if($EnableFederation){
+    # $federation = Git-HoundFederation -Organization $org -Repository $repos -Branches $branches -Environments $environments
+    # if($federation.nodes) { $nodes.AddRange(@($federation.nodes)) }
+    # if($federation.edges) { $edges.AddRange(@($federation.edges)) }
+    # }
         
     # Write-Host "[*] Enumerating Team Roles"
     # $teamroles = $org | Git-HoundTeamRole -Session $Session
