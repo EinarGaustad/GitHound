@@ -98,7 +98,7 @@ Once the PAT is created, GitHub will present it to you as shown below. You must 
   . ./githound.ps1
  ```
 
-3. Create a GitHub Session using your Personal Access Token.
+3. Create a GitHub Session using your Personal Access Token (PAT) or through a Github App.
 
 ```powershell
 #Github Session with PAT
