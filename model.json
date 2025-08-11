@@ -28,11 +28,39 @@
         "color": "#9EECFF"
       }
     },
+    "GHEnvironment": {
+      "icon": {
+        "type": "font-awesome",
+        "name": "seedling",
+        "color": "#FFB6C1"
+      }
+    },
     "GHBranch": {
       "icon": {
         "type": "font-awesome",
         "name": "code-branch",
         "color": "#FF80D2"
+      }
+    },
+      "GHShadowRepository": {
+      "icon": {
+        "type": "font-awesome",
+        "name": "box-archive",
+        "color": "#A0A0A0"
+      }
+    },
+    "GHShadowEnvironment": {
+      "icon": {
+        "type": "font-awesome",
+        "name": "seedling",
+        "color": "#A0A0A0"
+      }
+    },
+    "GHShadowBranch": {
+      "icon": {
+        "type": "font-awesome",
+        "name": "code-branch",
+        "color": "#A0A0A0"
       }
     },
     "GHOrgRole": {

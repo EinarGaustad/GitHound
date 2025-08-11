@@ -251,7 +251,7 @@ function New-GitHoundNode
 
     $props = [pscustomobject]@{
         id = $Id
-        kinds = @($Kind, 'GHBase')
+        kinds = @($Kind) + @('GHBase') 
         properties = $Properties
     }
 
@@ -271,7 +271,11 @@ function New-GitHoundEdge
 
         [Parameter(Position = 2, Mandatory = $true)]
         [PSObject]
-        $EndId
+        $EndId,
+
+        [Parameter(Position = 3, Mandatory = $false)]
+        [PSObject]
+        $Properties = @{}
 
         <#
         [Parameter(Mandatory = $false)]
@@ -296,7 +300,7 @@ function New-GitHoundEdge
             #match_by = $EndMatchBy
             value = $EndId
         }
-        properties = @{}
+        properties = $Properties
     }
 
     Write-Output $edge
@@ -881,29 +885,23 @@ function Git-HoundEnvironment {
 
                         # Create environment node with security properties
                         $envProps = [pscustomobject]@{
-                            id = Normalize-Null $env.id
-                            node_id = Normalize-Null $env.node_id
                             name = Normalize-Null $env.name
-                            url = Normalize-Null $env.url
-                            html_url = Normalize-Null $env.html_url
-                            repository_name = Normalize-Null $repo.properties.name
                             repository_full_name = Normalize-Null $repo.properties.full_name
-                            repository_id = Normalize-Null $repo.properties.id
                             created_at = Normalize-Null $env.created_at
                             updated_at = Normalize-Null $env.updated_at
                             
                             # Security-relevant properties
                             protection_rule_count = $protectionRuleCount
-                            has_wait_timer = $hasWaitTimer
-                            wait_timer_minutes = $waitTimerMinutes
-                            has_required_reviewers = $hasRequiredReviewers
-                            prevent_self_review = $preventSelfReview
-                            reviewer_count = $reviewerCount
-                            user_reviewer_count = $userReviewerCount
-                            team_reviewer_count = $teamReviewerCount
-                            has_branch_policy = $hasBranchPolicy
-                            protected_branches_only = $protectedBranches
-                            custom_branch_policies = $customBranchPolicies
+                            protection_wait_timer = $hasWaitTimer
+                            protection_wait_timer_minutes = $waitTimerMinutes
+                            protection_has_required_reviewers = $hasRequiredReviewers
+                            protection_prevent_self_review = $preventSelfReview
+                            protection_reviewer_count = $reviewerCount
+                            protection_user_reviewer_count = $userReviewerCount
+                            protection_team_reviewer_count = $teamReviewerCount
+                            protection_has_branch_policy = $hasBranchPolicy
+                            protection_protected_branches_only = $protectedBranches
+                            protection_custom_branch_policies = $customBranchPolicies
                                    
                         }
 
@@ -1562,7 +1560,7 @@ query SAML($login: String!, $count: Int = 100, $after: String = null) {
 function Git-HoundAppRegs {
     Write-Host "Fetching application registrations..." -ForegroundColor Green
     $allApps = @()
-    $uri = "https://graph.microsoft.com/v1.0/applications?`$top=30"
+    $uri = "https://graph.microsoft.com/v1.0/applications"
     
     do {
         try {
@@ -1657,7 +1655,7 @@ function Git-HoundFederation {
         [PSObject]
         $Branches,
 
-        [Parameter(Position = 3, Mandatory = $true)]
+        [Parameter(Position = 3, Mandatory = $false)]
         [PSObject]
         $Environments
     )
@@ -1678,11 +1676,8 @@ function Git-HoundFederation {
 
         Write-Host "Processing application registrations for GitHub Actions credentials..." -ForegroundColor Green
 
-        foreach ($app in $allAppRegs) {
-            Write-Host "Processing: $($app.displayName) ($($app.id))" -ForegroundColor Cyan
-            
+        foreach ($app in $allAppRegs) {            
             $fedCreds = Git-HoundFederatedCredentials -AppId $app.id
-            
             $githubCreds = $fedCreds | Where-Object { $_.issuer -eq "https://token.actions.githubusercontent.com" }
             
             if ($githubCreds) {
@@ -1691,7 +1686,10 @@ function Git-HoundFederation {
                     $subjectInfo = Git-HoundFederationSubjectInfo -Subject $cred.subject
                     
                     # Only process credentials for the current organization
-                    if ($subjectInfo.Organization -eq $Organization.properties.login) {
+                    #if ($subjectInfo.Organization -eq $Organization.properties.login) {
+                        $edgeProperties = [PSCustomObject]@{
+                        federation_subject = $cred.subject
+                        }           
                         
                         # Find matching repository
                         $matchingRepo = $Repository.nodes | Where-Object { 
@@ -1710,28 +1708,18 @@ function Git-HoundFederation {
                                 }
                                 
                                 if ($matchingBranch) {
-                                    Write-Host "Found matching branch: $($subjectInfo.Details)" -ForegroundColor Green
-                                    # Create edge between branch and app
-                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $branchHash -EndId $app.id))
+                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $branchHash -EndId $app.appId -Properties $edgeProperties))
                                 } else {
-                                    Write-Host "Creating shadow branch: $($subjectInfo.Details)" -ForegroundColor Yellow
-                                    # Create shadow branch node
                                     $shadowBranchProps = [pscustomobject]@{
                                         organization = $subjectInfo.Organization
                                         organization_id = $Organization.properties.node_id
                                         short_name = $subjectInfo.Details
                                         name = "$($subjectInfo.Repository)\$($subjectInfo.Details)"
-                                        protected = $null
                                         shadow = $true
-                                        federation_subject = $cred.subject
                                     }
-                                    $null = $nodes.Add((New-GitHoundNode -Id $branchHash -Kind 'ShadowBranch' -Properties $shadowBranchProps))
-                                    
-                                    # Create edge between repository and shadow branch
+                                    $null = $nodes.Add((New-GitHoundNode -Id $branchHash -Kind 'GHShadowBranch' -Properties $shadowBranchProps))
                                     $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasBranch' -StartId $matchingRepo.id -EndId $branchHash))
-                                    
-                                    # Create edge between shadow branch and app
-                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $branchHash -EndId $app.id))
+                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $branchHash -EndId $app.appId -Properties $edgeProperties))
                                 }
                             } elseif ($subjectInfo.Type -eq "Environment") {
                                 # Look for matching environment
@@ -1741,13 +1729,8 @@ function Git-HoundFederation {
                                 }
                                 
                                 if ($matchingEnvironment) {
-                                    Write-Host "Found matching environment: $($subjectInfo.Details)" -ForegroundColor Green
-                                    # Create edge between environment and app
-                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $matchingEnvironment.id -EndId $app.id))
-                                } else {
-                                    Write-Host "Creating shadow environment: $($subjectInfo.Details)" -ForegroundColor Yellow
-                                    
-                                    # Create shadow environment node
+                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $matchingEnvironment.id -EndId $app.appId -Properties $edgeProperties))
+                                } else {                                    
                                     $shadowEnvId = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($subjectInfo.Organization)+$($subjectInfo.Repository)+env+$($subjectInfo.Details)"))) -replace '-', ''
                                     
                                     $shadowEnvProps = [pscustomobject]@{
@@ -1758,24 +1741,15 @@ function Git-HoundFederation {
                                         organization_name = $subjectInfo.Organization
                                         organization_id = $Organization.properties.node_id
                                         shadow = $true
-                                        federation_subject = $cred.subject
                                     }
                                     $null = $nodes.Add((New-GitHoundNode -Id $shadowEnvId -Kind 'ShadowEnvironment' -Properties $shadowEnvProps))
-                                    
-                                    # Create edge between repository and shadow environment
                                     $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasEnvironment' -StartId $matchingRepo.id -EndId $shadowEnvId))
-                                    
-                                    # Create edge between shadow environment and app
-                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowEnvId -EndId $app.id))
+                                    $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowEnvId -EndId $app.appId  -Properties $edgeProperties))
                                 }
                             } else {
-                                # For other subjects, create edge to repository
-                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $matchingRepo.id -EndId $app.id))
+                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $matchingRepo.id -EndId $app.appId  -Properties $edgeProperties))
                             }
                         } else {
-                            Write-Host "Creating shadow repository: $($subjectInfo.Repository)" -ForegroundColor Yellow
-                            
-                            # Create shadow repository node
                             $shadowRepoId = [System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($subjectInfo.Organization)+$($subjectInfo.Repository)"))
                             $shadowRepoHash = [System.BitConverter]::ToString($shadowRepoId) -replace '-', ''
                             
@@ -1786,15 +1760,11 @@ function Git-HoundFederation {
                                 name = $subjectInfo.Repository
                                 full_name = "$($subjectInfo.Organization)/$($subjectInfo.Repository)"
                                 shadow = $true
-                                federation_subject = $cred.subject
                             }
-                            $null = $nodes.Add((New-GitHoundNode -Id $shadowRepoHash -Kind 'ShadowRepository' -Properties $shadowRepoProps))
-                            
-                            # Create edge between organization and shadow repository
+                            $null = $nodes.Add((New-GitHoundNode -Id $shadowRepoHash -Kind 'GHShadowRepository' -Properties $shadowRepoProps))
                             $null = $edges.Add((New-GitHoundEdge -Kind 'GHOwns' -StartId $Organization.properties.node_id -EndId $shadowRepoHash))
                             
                             if ($subjectInfo.Type -eq "Branch") {
-                                # Create shadow branch node
                                 $branchHash = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($subjectInfo.Organization)+$($subjectInfo.Organization)/$($subjectInfo.Repository)+$($subjectInfo.Details)"))) -replace '-', ''
                                 
                                 $shadowBranchProps = [pscustomobject]@{
@@ -1802,19 +1772,12 @@ function Git-HoundFederation {
                                     organization_id = $Organization.properties.node_id
                                     short_name = $subjectInfo.Details
                                     name = "$($subjectInfo.Repository)\$($subjectInfo.Details)"
-                                    protected = $null
                                     shadow = $true
-                                    federation_subject = $cred.subject
                                 }
-                                $null = $nodes.Add((New-GitHoundNode -Id $branchHash -Kind 'ShadowBranch' -Properties $shadowBranchProps))
-                                
-                                # Create edge between shadow repository and shadow branch
+                                $null = $nodes.Add((New-GitHoundNode -Id $branchHash -Kind 'GHShadowBranch' -Properties $shadowBranchProps))
                                 $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasBranch' -StartId $shadowRepoHash -EndId $branchHash))
-                                
-                                # Create edge between shadow branch and app
-                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $branchHash -EndId $app.id))
+                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $branchHash -EndId $app.appId -Properties $edgeProperties))
                             } elseif ($subjectInfo.Type -eq "Environment") {
-                                # Create shadow environment node
                                 $shadowEnvId = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$($subjectInfo.Organization)+$($subjectInfo.Repository)+env+$($subjectInfo.Details)"))) -replace '-', ''
                                 
                                 $shadowEnvProps = [pscustomobject]@{
@@ -1825,25 +1788,19 @@ function Git-HoundFederation {
                                     organization_name = $subjectInfo.Organization
                                     organization_id = $Organization.properties.node_id
                                     shadow = $true
-                                    federation_subject = $cred.subject
                                 }
-                                $null = $nodes.Add((New-GitHoundNode -Id $shadowEnvId -Kind 'ShadowEnvironment' -Properties $shadowEnvProps))
-                                
-                                # Create edge between shadow repository and shadow environment
+                                $null = $nodes.Add((New-GitHoundNode -Id $shadowEnvId -Kind 'GHShadowEnvironment' -Properties $shadowEnvProps))
                                 $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasEnvironment' -StartId $shadowRepoHash -EndId $shadowEnvId))
-                                
-                                # Create edge between shadow environment and app
-                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowEnvId -EndId $app.id))
+                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowEnvId -EndId $app.appId -Properties $edgeProperties))
                             } else {
-                                # For other subjects, create edge to shadow repository
-                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowRepoHash -EndId $app.id))
+                                $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowRepoHash -EndId $app.appId -Properties $edgeProperties ))
                             }
                         }
-                    }
+                    #}
                 }
                 
                 $appInfo = [PSCustomObject]@{
-                    AppRegistrationId = $app.id
+                    AppRegistrationId = $app.appId
                     DisplayName = $app.displayName
                     GitHubSubjects = $githubCreds.subject
                     CreatedDateTime = $app.createdDateTime
@@ -1856,7 +1813,7 @@ function Git-HoundFederation {
         }
 
         # Display summary
-        Write-Host "`nSUMMARY:" -ForegroundColor Magenta
+        Write-Host "`nSUMMARY Azure Federation:" -ForegroundColor Magenta
         Write-Host "Total App Registrations processed: $($allAppRegs.Count)" -ForegroundColor White
         Write-Host "App Registrations with GitHub Actions credentials: $($githubApps.Count)" -ForegroundColor White
         Write-Host "Nodes created: $($nodes.Count)" -ForegroundColor White
@@ -1883,7 +1840,11 @@ function Invoke-GitHound
     Param(
         [Parameter(Position = 0, Mandatory = $true)]
         [PSTypeName('GitHound.Session')]
-        $Session
+        $Session,
+    
+        [Parameter()]
+        [switch]
+        $EnableFederation
     )
 
     $edges = New-Object System.Collections.ArrayList
@@ -1917,12 +1878,12 @@ function Invoke-GitHound
     if($environments.nodes) { $nodes.AddRange(@($environments.nodes)) }
     if($environments.edges) { $edges.AddRange(@($environments.edges)) }
 
-    # Write-Host "[*] Enumerating Azure Federation"
-    # if($EnableFederation){
-    # $federation = Git-HoundFederation -Organization $org -Repository $repos -Branches $branches -Environments $environments
-    # if($federation.nodes) { $nodes.AddRange(@($federation.nodes)) }
-    # if($federation.edges) { $edges.AddRange(@($federation.edges)) }
-    # }
+    Write-Host "[*] Enumerating Azure Federation"
+    if($EnableFederation){
+    $federation = Git-HoundFederation -Organization $org -Repository $repos -Branches $branches -Environments $environments
+    if($federation.nodes) { $nodes.AddRange(@($federation.nodes)) }
+    if($federation.edges) { $edges.AddRange(@($federation.edges)) }
+    }
         
     # Write-Host "[*] Enumerating Team Roles"
     # $teamroles = $org | Git-HoundTeamRole -Session $Session
