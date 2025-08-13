@@ -78,6 +78,7 @@ The following permissions are required:
 | Repository   | Administrator             | Read-only |
 | Repository   | Contents                  | Read-only |
 | Repository   | Metadata                  | Read-only |
+| Repository   | Secret scanning alerts    | Read-only |
 | Organization | Administrator             | Read-only |
 | Organization | Custom organization roles | Read-only |
 | Organization | Custom repository roles   | Read-only |
