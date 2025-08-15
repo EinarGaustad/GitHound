@@ -1942,8 +1942,8 @@ function Invoke-GitHound
     if($environments.nodes) { $nodes.AddRange(@($environments.nodes)) }
     if($environments.edges) { $edges.AddRange(@($environments.edges)) }
 
-    Write-Host "[*] Enumerating Azure Federation"
     if($EnableFederation){
+        Write-Host "[*] Enumerating Azure Federation"
         $federationParams = @{
             Organization = $org
             Repository = $repos
@@ -1993,7 +1993,7 @@ function Invoke-GitHound
             nodes = $nodes.ToArray()
             edges = $edges.ToArray()
         }
-    } | ConvertTo-Json -Depth 10 | Out-File -FilePath "./githound_$($org.id).json"
+    } | ConvertTo-Json -Depth 10 | Out-File -FilePath "./githound.json"
 
     #$payload | BHDataUploadJSON
 }
