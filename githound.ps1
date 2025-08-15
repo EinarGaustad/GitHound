@@ -468,12 +468,8 @@ function Git-HoundRepository
     $nodes = New-Object System.Collections.ArrayList
     $edges = New-Object System.Collections.ArrayList
 
-    $targetRepoName = "csirt-playground"  # Replace with your actual repository name
-
-    $repo = Invoke-GithubRestMethod -Session $Session -Path "repos/$($Organization.Properties.login)/$targetRepoName"
-
-#    foreach($repo in (Invoke-GithubRestMethod -Session $Session -Path "orgs/$($Organization.Properties.login)/repos"))
-#   {
+    foreach($repo in (Invoke-GithubRestMethod -Session $Session -Path "orgs/$($Organization.Properties.login)/repos"))
+    {
         $properties = @{
             id                          = Normalize-Null $repo.id
             node_id                     = Normalize-Null $repo.node_id
@@ -504,7 +500,7 @@ function Git-HoundRepository
         }
         $null = $nodes.Add((New-GitHoundNode -Id $repo.node_id -Kind 'GHRepository' -Properties $properties))
         $null = $edges.Add((New-GitHoundEdge -Kind 'GHOwns' -StartId $repo.owner.node_id -EndId $repo.node_id))
-    #}
+    }
 
     $output = [PSCustomObject]@{
         Nodes = $nodes
@@ -1663,18 +1659,71 @@ function Git-HoundFederation {
 
         [Parameter(Position = 3, Mandatory = $false)]
         [PSObject]
-        $Environments
+        $Environments,
+
+        [Parameter(Mandatory = $false)]
+        [string]$TenantId,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$ClientId,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$ClientSecret
     )
 
     $nodes = New-Object System.Collections.ArrayList
     $edges = New-Object System.Collections.ArrayList
 
-    Write-Host "Getting access token from Azure CLI..." -ForegroundColor Green
-    $accessToken = az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv
+    # Azure authentication with conditional logic
+    if ($ClientId) {
+        # Use Azure App Registration authentication
+        Write-Host "Getting access token using Azure App Registration..." -ForegroundColor Green
+        
+        # Validate required parameters for app registration
+        if (-not $TenantId -or -not $ClientSecret) {
+            throw "When using ClientId, both TenantId and ClientSecret are required."
+        }
+        
+        try {
+            $tokenUri = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
+            $body = @{ 
+                client_id = $ClientId
+                client_secret = $ClientSecret
+                scope = "https://graph.microsoft.com/.default"
+                grant_type = "client_credentials" 
+            }
+            $accessToken = (Invoke-RestMethod -Uri $tokenUri -Method POST -Body $body -ContentType "application/x-www-form-urlencoded").access_token
 
-    if (-not $accessToken) {
-        throw "Failed to get access token. Please run 'az login' first."
+            if (-not $accessToken) {
+                throw "Failed to get access token from app registration."
+            }
+            
+            Write-Host "Successfully authenticated using Azure App Registration" -ForegroundColor Green
+        }
+        catch {
+            Write-Error "Azure App Registration authentication failed: $($_.Exception.Message)"
+            throw "Failed to authenticate with app registration. Please verify TenantId, ClientId, and ClientSecret."
+        }
     }
+    else {
+        # Use Azure CLI authentication (fallback)
+        Write-Host "Getting access token from Azure CLI..." -ForegroundColor Green
+        
+        try {
+            $accessToken = az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv
+
+            if (-not $accessToken) {
+                throw "Azure CLI returned empty token."
+            }
+            
+            Write-Host "Successfully authenticated using Azure CLI" -ForegroundColor Green
+        }
+        catch {
+            Write-Error "Azure CLI authentication failed: $($_.Exception.Message)"
+            throw "Failed to get access token from Azure CLI. Please run 'az login' first or provide ClientId/ClientSecret parameters."
+        }
+    }
+
 
     try {
         $allAppRegs = Git-HoundAppRegs
@@ -1692,7 +1741,7 @@ function Git-HoundFederation {
                     $subjectInfo = Git-HoundFederationSubjectInfo -Subject $cred.subject
                     
                     # Only process credentials for the current organization
-                    #if ($subjectInfo.Organization -eq $Organization.properties.login) {
+                    if ($subjectInfo.Organization -eq $Organization.properties.login) {
                         $edgeProperties = [PSCustomObject]@{
                         federation_subject = $cred.subject
                         }           
@@ -1802,7 +1851,7 @@ function Git-HoundFederation {
                                 $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowRepoHash -EndId $app.appId -Properties $edgeProperties ))
                             }
                         }
-                    #}
+                    }
                 }
                 
                 $appInfo = [PSCustomObject]@{
@@ -1850,7 +1899,16 @@ function Invoke-GitHound
     
         [Parameter()]
         [switch]
-        $EnableFederation
+        $EnableFederation,
+
+        [Parameter()]
+        [string]$TenantId,
+        
+        [Parameter()]
+        [string]$ClientId,
+        
+        [Parameter()]
+        [string]$ClientSecret
     )
 
     $edges = New-Object System.Collections.ArrayList
@@ -1860,14 +1918,14 @@ function Invoke-GitHound
     $org = Git-HoundOrganization -Session $Session
     $nodes.Add($org) | Out-Null
 
-    # Write-Host "[*] Enumerating Organization Users"
-    # $users = $org | Git-HoundUser -Session $Session
-    # if($users) { $nodes.AddRange(@($users)) }
+    Write-Host "[*] Enumerating Organization Users"
+    $users = $org | Git-HoundUser -Session $Session
+    if($users) { $nodes.AddRange(@($users)) }
 
-    # Write-Host "[*] Enumerating Organization Teams"
-    # $teams = $org | Git-HoundTeam -Session $Session
-    # if($teams.nodes) { $nodes.AddRange(@($teams.nodes)) }
-    # if($teams.edges) { $edges.AddRange(@($teams.edges)) }
+    Write-Host "[*] Enumerating Organization Teams"
+    $teams = $org | Git-HoundTeam -Session $Session
+    if($teams.nodes) { $nodes.AddRange(@($teams.nodes)) }
+    if($teams.edges) { $edges.AddRange(@($teams.edges)) }
 
     Write-Host "[*] Enumerating Organization Repositories"
     $repos = $org | Git-HoundRepository -Session $Session
@@ -1886,39 +1944,50 @@ function Invoke-GitHound
 
     Write-Host "[*] Enumerating Azure Federation"
     if($EnableFederation){
-    $federation = Git-HoundFederation -Organization $org -Repository $repos -Branches $branches -Environments $environments
-    if($federation.nodes) { $nodes.AddRange(@($federation.nodes)) }
-    if($federation.edges) { $edges.AddRange(@($federation.edges)) }
+        $federationParams = @{
+            Organization = $org
+            Repository = $repos
+            Branches = $branches
+            Environments = $environments
+        }
+        if ($ClientId) {
+            $federationParams.ClientId = $ClientId
+            $federationParams.TenantId = $TenantId
+            $federationParams.ClientSecret = $ClientSecret
+        }
+        $federation = Git-HoundFederation @federationParams
+        if($federation.nodes) { $nodes.AddRange(@($federation.nodes)) }
+        if($federation.edges) { $edges.AddRange(@($federation.edges)) }
     }
         
-    # Write-Host "[*] Enumerating Team Roles"
-    # $teamroles = $org | Git-HoundTeamRole -Session $Session
-    # if($teamroles.nodes) { $nodes.AddRange(@($teamroles.nodes)) }
-    # if($teamroles.edges) { $edges.AddRange(@($teamroles.edges)) }
+    Write-Host "[*] Enumerating Team Roles"
+    $teamroles = $org | Git-HoundTeamRole -Session $Session
+    if($teamroles.nodes) { $nodes.AddRange(@($teamroles.nodes)) }
+    if($teamroles.edges) { $edges.AddRange(@($teamroles.edges)) }
 
-    # Write-Host "[*] Enumerating Organization Roles"
-    # $orgroles = $org | Git-HoundOrganizationRole -Session $Session
-    # if($orgroles.nodes) { $nodes.AddRange(@($orgroles.nodes)) }
-    # if($orgroles.edges) { $edges.AddRange(@($orgroles.edges)) }
+    Write-Host "[*] Enumerating Organization Roles"
+    $orgroles = $org | Git-HoundOrganizationRole -Session $Session
+    if($orgroles.nodes) { $nodes.AddRange(@($orgroles.nodes)) }
+    if($orgroles.edges) { $edges.AddRange(@($orgroles.edges)) }
 
-    # Write-Host "[*] Enumerating Repository Roles"
-    # $reporoles = $org | Git-HoundRepositoryRole -Session $Session
-    # if($reporoles.nodes) { $nodes.AddRange(@($reporoles.nodes)) }
-    # if($reporoles.edges) { $edges.AddRange(@($reporoles.edges)) }
+    Write-Host "[*] Enumerating Repository Roles"
+    $reporoles = $org | Git-HoundRepositoryRole -Session $Session
+    if($reporoles.nodes) { $nodes.AddRange(@($reporoles.nodes)) }
+    if($reporoles.edges) { $edges.AddRange(@($reporoles.edges)) }
     
     # Write-Host "[*] Enumerating Secret Scanning Alerts"
     # $secretalerts = $org | Git-HoundSecretScanningAlert -Session $Session
     # if($secretalerts.nodes) { $nodes.AddRange(@($secretalerts.nodes)) }
     # if($secretalerts.edges) { $edges.AddRange(@($secretalerts.edges)) }
 
-    # Write-Host "[*] Enumerating SAML Identity Provider"
-    # $saml = Git-HoundGraphQlSamlProvider -Session $Session
-    # if($saml) { $edges.AddRange(@($saml)) }
+    Write-Host "[*] Enumerating SAML Identity Provider"
+    $saml = Git-HoundGraphQlSamlProvider -Session $Session
+    if($saml) { $edges.AddRange(@($saml)) }
 
     Write-Host "[*] Converting to OpenGraph JSON Payload"
     $payload = [PSCustomObject]@{
         metadata = [PSCustomObject]@{
-            source_kind = "GHBase"
+           # source_kind = "GHBase"
         }
         graph = [PSCustomObject]@{
             nodes = $nodes.ToArray()
