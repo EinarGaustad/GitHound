@@ -1993,7 +1993,7 @@ function Invoke-GitHound
             nodes = $nodes.ToArray()
             edges = $edges.ToArray()
         }
-    } | ConvertTo-Json -Depth 10 | Out-File -FilePath "./githound.json"
+    } | ConvertTo-Json -Depth 10 | Out-File -FilePath "./output/githound.json"
 
     #$payload | BHDataUploadJSON
 }
