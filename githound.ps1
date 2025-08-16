@@ -1,3 +1,29 @@
+function Get-GitHoundFunctionBundle {
+    [OutputType([hashtable])]
+    param() 
+    $GitHoundFunctions = @{}
+    $functionsToRegister = @(
+        'Normalize-Null',
+        'New-GitHoundNode',
+        'New-GitHoundEdge',
+        'Invoke-GithubRestMethod',
+        'Wait-GithubRestRateLimit',
+        'Wait-GithubRateLimitReached',
+        'Get-RateLimitInformation'
+    )
+    
+    # Register each function
+    foreach ($funcName in $functionsToRegister) {
+        if (Get-Command $funcName -ErrorAction SilentlyContinue) {
+            $GitHoundFunctions[$funcName] = ((Get-Command $funcName).Definition).ToString()
+        } else {
+            Write-Warning "Function $funcName not found and will be skipped"
+        }
+    }
+
+    return $GitHoundFunctions
+}
+
 function New-GithubSession {
     [OutputType('GitHound.Session')] 
     [CmdletBinding()]
@@ -445,18 +471,17 @@ function Git-HoundUser
 
     $nodes = New-Object System.Collections.ArrayList
 
-    $normalize_null = ${function:Normalize-Null}.ToString()
-    $new_githoundnode = ${function:New-GitHoundNode}.ToString()
-    $invoke_githubrestmethod = ${function:Invoke-GithubRestMethod}.ToString()
 
     Invoke-GithubRestMethod -Session $Session -Path "orgs/$($Organization.Properties.login)/members" | ForEach-Object -Parallel {
         
         $nodes = $using:nodes
         $Session = $using:Session
         $Organization = $using:Organization
-        ${function:Normalize-Null} = $using:normalize_null
-        ${function:New-GitHoundNode} = $using:new_githoundnode
-        ${function:Invoke-GithubRestMethod} = $using:invoke_githubrestmethod
+        $functionBundle = $using:GitHoundFunctionBundle
+        foreach($funcName in $functionBundle.Keys) {
+            Set-Item -Path "function:$funcName" -Value ([scriptblock]::Create($functionBundle[$funcName]))
+        }
+        
 
         $user = $_
         Write-Verbose "Fetching user details for $($user.login)"
@@ -563,10 +588,6 @@ function Git-HoundBranch
         $nodes = New-Object System.Collections.ArrayList
         $edges = New-Object System.Collections.ArrayList
 
-        $normalize_null = ${function:Normalize-Null}.ToString()
-        $new_githoundnode = ${function:New-GitHoundNode}.ToString()
-        $new_githoundedge = ${function:New-GitHoundEdge}.ToString()
-        $invoke_githubrestmethod = ${function:Invoke-GithubRestMethod}.ToString()
     }
 
     process
@@ -575,10 +596,10 @@ function Git-HoundBranch
             $nodes = $using:nodes
             $edges = $using:edges
             $Session = $using:Session
-            ${function:Normalize-Null} = $using:normalize_null
-            ${function:New-GitHoundNode} = $using:new_githoundnode
-            ${function:New-GitHoundEdge} = $using:new_githoundedge
-            ${function:Invoke-GithubRestMethod} = $using:invoke_githubrestmethod
+            $functionBundle = $using:GitHoundFunctionBundle
+            foreach($funcName in $functionBundle.Keys) {
+                Set-Item -Path "function:$funcName" -Value ([scriptblock]::Create($functionBundle[$funcName]))
+            }
             $repo = $_
 
             Write-Verbose "Fetching branches for $($repo.properties.full_name)"
@@ -744,9 +765,6 @@ function Git-HoundOrganizationRole
     $nodes = New-Object System.Collections.ArrayList
     $edges = New-Object System.Collections.ArrayList
 
-    $new_githoundedge = ${function:New-GitHoundEdge}.ToString()
-    $invoke_githubrestmethod = ${function:Invoke-GithubRestMethod}.ToString()
-
     $orgAllRepoReadId = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("$($Organization.id)_all_repo_read"))
     $orgAllRepoTriageId = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("$($Organization.id)_all_repo_triage"))
     $orgAllRepoWriteId = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("$($Organization.id)_all_repo_write"))
@@ -875,8 +893,10 @@ function Git-HoundOrganizationRole
         $Organization = $using:Organization
         $orgOwnersId = $using:orgOwnersId
         $orgMembersId = $using:orgMembersId
-        ${function:New-GitHoundEdge} = $using:new_githoundedge
-        ${function:Invoke-GithubRestMethod} = $using:invoke_githubrestmethod
+        $functionBundle = $using:GitHoundFunctionBundle
+        foreach($funcName in $functionBundle.Keys) {
+            Set-Item -Path "function:$funcName" -Value ([scriptblock]::Create($functionBundle[$funcName]))
+        }
         $user = $_
         
         switch((Invoke-GithubRestMethod -Session $Session -Path "orgs/$($organization.Properties.login)/memberships/$($user.login)").role)
@@ -913,21 +933,17 @@ function Git-HoundTeamRole
     $nodes = New-Object System.Collections.ArrayList
     $edges = New-Object System.Collections.ArrayList
 
-    $normalize_null = ${function:Normalize-Null}.ToString()
-    $new_githoundnode = ${function:New-GitHoundNode}.ToString()
-    $new_githoundedge = ${function:New-GitHoundEdge}.ToString()
-    $invoke_githubrestmethod = ${function:Invoke-GithubRestMethod}.ToString()
-
     Invoke-GithubRestMethod -Session $Session -Path "orgs/$($Organization.Properties.login)/teams" | ForEach-Object -Parallel {
         
         $nodes = $using:nodes
         $edges = $using:edges
         $Session = $using:Session
         $Organization = $using:Organization
-        ${function:Normalize-Null} = $using:normalize_null
-        ${function:New-GitHoundNode} = $using:new_githoundnode
-        ${function:New-GitHoundEdge} = $using:new_githoundedge
-        ${function:Invoke-GithubRestMethod} = $using:invoke_githubrestmethod
+
+        $functionBundle = $using:GitHoundFunctionBundle
+        foreach($funcName in $functionBundle.Keys) {
+            Set-Item -Path "function:$funcName" -Value ([scriptblock]::Create($functionBundle[$funcName]))
+        }
 
         $memberId = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("$($_.node_id)_members"))
         $memberProps = [pscustomobject]@{
@@ -998,10 +1014,6 @@ function Git-HoundRepositoryRole
 
     $customRepoRoles = (Invoke-GithubRestMethod -Session $Session -Path "orgs/$($Organization.Properties.login)/custom-repository-roles").custom_roles
 
-    $normalize_null = ${function:Normalize-Null}.ToString()
-    $new_githoundnode = ${function:New-GitHoundNode}.ToString()
-    $new_githoundedge = ${function:New-GitHoundEdge}.ToString()
-    $invoke_githubrestmethod = ${function:Invoke-GithubRestMethod}.ToString()
 
     Invoke-GithubRestMethod -Session $Session -Path "orgs/$($Organization.properties.login)/repos" | ForEach-Object -Parallel{
         
@@ -1015,10 +1027,11 @@ function Git-HoundRepositoryRole
         $orgAllRepoMaintainId = $using:orgAllRepoMaintainId
         $orgAllRepoAdminId = $using:orgAllRepoAdminId
         $customRepoRoles = $using:customRepoRoles
-        ${function:Normalize-Null} = $using:normalize_null
-        ${function:New-GitHoundNode} = $using:new_githoundnode
-        ${function:New-GitHoundEdge} = $using:new_githoundedge
-        ${function:Invoke-GithubRestMethod} = $using:invoke_githubrestmethod
+
+        $functionBundle = $using:GitHoundFunctionBundle
+        foreach($funcName in $functionBundle.Keys) {
+            Set-Item -Path "function:$funcName" -Value ([scriptblock]::Create($functionBundle[$funcName]))
+        }
         $repo = $_
 
         # Create $repo Read Role
@@ -1407,6 +1420,8 @@ function Invoke-GitHound
 
     $nodes = New-Object System.Collections.ArrayList
     $edges = New-Object System.Collections.ArrayList
+    
+    $Global:GitHoundFunctionBundle = Get-GitHoundFunctionBundle
 
     Write-Host "[*] Starting Git-Hound for $($Session.OrganizationName)"
     $org = Git-HoundOrganization -Session $Session
