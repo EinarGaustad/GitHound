@@ -431,7 +431,7 @@ function Git-HoundUser
         $Organization
     )
 
-    $nodes = New-Object System.Collections.ArrayList
+    $nodes = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
 
     $normalize_null = ${function:Normalize-Null}.ToString()
     $new_githoundnode = ${function:New-GitHoundNode}.ToString()
@@ -470,10 +470,19 @@ function Git-HoundUser
             site_admin          = Normalize-Null $user.site_admin
         }
         
-        $null = $nodes.Add((New-GitHoundNode -Id $user.node_id -Kind 'GHUser' -Properties $properties))
+        $node = New-GitHoundNode -Id $user.node_id -Kind 'GHUser' -Properties $properties
+        $nodes.Add($node)
     } -ThrottleLimit 25
 
-    Write-Output $nodes
+    # Convert ConcurrentBag to ArrayList for output consistency
+    $resultNodes = [System.Collections.ArrayList]::new()
+    foreach($node in $nodes) {
+        if($null -ne $node) {
+            $null = $resultNodes.Add($node)
+        }
+    }
+
+    Write-Output $resultNodes
 }
 
 function Git-HoundRepository
@@ -548,8 +557,8 @@ function Git-HoundBranch
     
     begin
     {
-        $nodes = New-Object System.Collections.ArrayList
-        $edges = New-Object System.Collections.ArrayList
+        $nodes = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+        $edges = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
 
         $normalize_null = ${function:Normalize-Null}.ToString()
         $new_githoundnode = ${function:New-GitHoundNode}.ToString()
@@ -606,7 +615,7 @@ function Git-HoundBranch
                         else {
                             $BranchProtectionProperties["protection_required_approving_review_count"] = 0
                         }
-                        if ($Protections.required_pull_request_reviews.require_code_owner_reviews > 0) {
+                        if ($Protections.required_pull_request_reviews.require_code_owner_reviews -gt 0) {
                             $BranchProtectionProperties["protection_require_code_owner_reviews"] = $Protections.required_pull_request_reviews.require_code_owner_reviews
                             $BranchProtectionProperties["protection_required_pull_request_reviews"] = $True
                         }
@@ -826,9 +835,25 @@ function Git-HoundBranch
 
     end
     {
+        # Convert ConcurrentBag to ArrayList for output consistency
+        $resultNodes = [System.Collections.ArrayList]::new()
+        $resultEdges = [System.Collections.ArrayList]::new()
+        
+        foreach($node in $nodes) {
+            if($null -ne $node) {
+                $null = $resultNodes.Add($node)
+            }
+        }
+        
+        foreach($edge in $edges) {
+            if($null -ne $edge) {
+                $null = $resultEdges.Add($edge)
+            }
+        }
+
         $output = [PSCustomObject]@{
-            Nodes = $nodes
-            Edges = $edges
+            Nodes = $resultNodes
+            Edges = $resultEdges
         }
     
         Write-Output $output
@@ -971,8 +996,8 @@ function Git-HoundOrganizationRole
         $Organization
     )
 
-    $nodes = New-Object System.Collections.ArrayList
-    $edges = New-Object System.Collections.ArrayList
+    $nodes = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+    $edges = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
 
     $new_githoundedge = ${function:New-GitHoundEdge}.ToString()
     $invoke_githubrestmethod = ${function:Invoke-GithubRestMethod}.ToString()
@@ -1109,19 +1134,59 @@ function Git-HoundOrganizationRole
         ${function:Invoke-GithubRestMethod} = $using:invoke_githubrestmethod
         $user = $_
         
-        switch((Invoke-GithubRestMethod -Session $Session -Path "orgs/$($organization.Properties.login)/memberships/$($user.login)").role)
-        {
-            'admin' { $destId = $orgOwnersId}
-            'member' { $destId = $orgMembersId }
-            #'moderator' { $orgmoderatorsList.Add($m) }
-            #'security admin' { $orgsecurityList.Add($m) }
+        # Validate user data before processing
+        if ([string]::IsNullOrWhiteSpace($user.node_id)) {
+            Write-Warning "User node_id is null or empty for user: $($user.login)"
+            return
         }
-        $null = $edges.Add($(New-GitHoundEdge -Kind 'GHHasRole' -StartId $user.node_id -EndId $destId))
+        
+        try {
+            $membership = Invoke-GithubRestMethod -Session $Session -Path "orgs/$($organization.Properties.login)/memberships/$($user.login)"
+            
+            if ([string]::IsNullOrWhiteSpace($membership.role)) {
+                Write-Warning "Membership role is null for user: $($user.login)"
+                return
+            }
+            
+            switch($membership.role)
+            {
+                'admin' { $destId = $orgOwnersId}
+                'member' { $destId = $orgMembersId }
+                #'moderator' { $orgmoderatorsList.Add($m) }
+                #'security admin' { $orgsecurityList.Add($m) }
+                default { 
+                    Write-Warning "Unknown role '$($membership.role)' for user: $($user.login)"
+                    return
+                }
+            }
+            
+            $edge = New-GitHoundEdge -Kind 'GHHasRole' -StartId $user.node_id -EndId $destId
+            $null = $edges.Add($edge)
+        }
+        catch {
+            Write-Warning "Error processing user membership for $($user.login): $($_.Exception.Message)"
+        }
     } -ThrottleLimit 25
 
+    # Convert ConcurrentBag to ArrayList for output consistency
+    $resultNodes = [System.Collections.ArrayList]::new()
+    $resultEdges = [System.Collections.ArrayList]::new()
+    
+    foreach($node in $nodes) {
+        if($null -ne $node) {
+            $null = $resultNodes.Add($node)
+        }
+    }
+    
+    foreach($edge in $edges) {
+        if($null -ne $edge) {
+            $null = $resultEdges.Add($edge)
+        }
+    }
+
     $output = [PSCustomObject]@{
-        Nodes = $nodes
-        Edges = $edges
+        Nodes = $resultNodes
+        Edges = $resultEdges
     }
 
     Write-Output $output
@@ -1140,8 +1205,8 @@ function Git-HoundTeamRole
         $Organization
     )
 
-    $nodes = New-Object System.Collections.ArrayList
-    $edges = New-Object System.Collections.ArrayList
+    $nodes = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+    $edges = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
 
     $normalize_null = ${function:Normalize-Null}.ToString()
     $new_githoundnode = ${function:New-GitHoundNode}.ToString()
@@ -1191,13 +1256,32 @@ function Git-HoundTeamRole
                 'member' { $targetId = $memberId }
                 'maintainer' { $targetId = $maintainerId }
             }
-            $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasRole' -StartId $member.node_id -EndId $targetId))
+            $edge = New-GitHoundEdge -Kind 'GHHasRole' -StartId $member.node_id -EndId $targetId
+            if ($null -ne $edge) {
+                $null = $edges.Add($edge)
+            }
         }
     } -ThrottleLimit 25
 
+    # Convert to ArrayList for output consistency and filter nulls
+    $filteredNodes = [System.Collections.ArrayList]::new()
+    $filteredEdges = [System.Collections.ArrayList]::new()
+    
+    foreach($node in $nodes) {
+        if ($null -ne $node) {
+            $null = $filteredNodes.Add($node)
+        }
+    }
+    
+    foreach($edge in $edges) {
+        if ($null -ne $edge) {
+            $null = $filteredEdges.Add($edge)
+        }
+    }
+
     $output = [PSCustomObject]@{
-        Nodes = $nodes
-        Edges = $edges
+        Nodes = $filteredNodes
+        Edges = $filteredEdges
     }
 
     Write-Output $output
@@ -1217,8 +1301,8 @@ function Git-HoundRepositoryRole
         $Organization
     )
 
-    $nodes = New-Object System.Collections.ArrayList
-    $edges = New-Object System.Collections.ArrayList
+    $nodes = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+    $edges = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
 
     $orgAllRepoReadId = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("$($Organization.id)_all_repo_read"))
     $orgAllRepoTriageId = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("$($Organization.id)_all_repo_triage"))
@@ -1415,9 +1499,25 @@ function Git-HoundRepositoryRole
         }
     } -ThrottleLimit 25
 
+    # Convert ConcurrentBag to ArrayList for output consistency
+    $resultNodes = [System.Collections.ArrayList]::new()
+    $resultEdges = [System.Collections.ArrayList]::new()
+    
+    foreach($node in $nodes) {
+        if($null -ne $node) {
+            $null = $resultNodes.Add($node)
+        }
+    }
+    
+    foreach($edge in $edges) {
+        if($null -ne $edge) {
+            $null = $resultEdges.Add($edge)
+        }
+    }
+
     $output = [PSCustomObject]@{
-        Nodes = $nodes
-        Edges = $edges
+        Nodes = $resultNodes
+        Edges = $resultEdges
     }
 
     Write-Output $output
@@ -1934,36 +2034,73 @@ function Invoke-GitHound
         [string]$ClientSecret
     )
 
-    $edges = New-Object System.Collections.ArrayList
-    $nodes = New-Object System.Collections.ArrayList
+    # Use thread-safe collections for concurrent access
+    $edges = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+    $nodes = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
 
     Write-Host "[*] Starting Git-Hound for $($Session.OrganizationName)"
     $org = Git-HoundOrganization -Session $Session
-    $nodes.Add($org) | Out-Null
+    $nodes.Add($org)
 
     Write-Host "[*] Enumerating Organization Users"
     $users = $org | Git-HoundUser -Session $Session
-    if($users) { $nodes.AddRange(@($users)) }
+    if($users) { 
+        foreach($user in $users) { 
+            if($null -ne $user) { $nodes.Add($user) } 
+        } 
+    }
 
     Write-Host "[*] Enumerating Organization Teams"
     $teams = $org | Git-HoundTeam -Session $Session
-    if($teams.nodes) { $nodes.AddRange(@($teams.nodes)) }
-    if($teams.edges) { $edges.AddRange(@($teams.edges)) }
+    if($teams.nodes) { 
+        foreach($node in $teams.nodes) { 
+            if($null -ne $node) { $nodes.Add($node) } 
+        } 
+    }
+    if($teams.edges) { 
+        foreach($edge in $teams.edges) { 
+            if($null -ne $edge) { $edges.Add($edge) } 
+        } 
+    }
 
     Write-Host "[*] Enumerating Organization Repositories"
     $repos = $org | Git-HoundRepository -Session $Session
-    if($repos.nodes) { $nodes.AddRange(@($repos.nodes)) }
-    if($repos.edges) { $edges.AddRange(@($repos.edges)) }
+    if($repos.nodes) { 
+        foreach($node in $repos.nodes) { 
+            if($null -ne $node) { $nodes.Add($node) } 
+        } 
+    }
+    if($repos.edges) { 
+        foreach($edge in $repos.edges) { 
+            if($null -ne $edge) { $edges.Add($edge) } 
+        } 
+    }
 
     Write-Host "[*] Enumerating Organization Branches"
     $branches = $repos | Git-HoundBranch -Session $Session
-    if($branches.nodes) { $nodes.AddRange(@($branches.nodes)) }
-    if($branches.edges) { $edges.AddRange(@($branches.edges)) }
+    if($branches.nodes) { 
+        foreach($node in $branches.nodes) { 
+            if($null -ne $node) { $nodes.Add($node) } 
+        } 
+    }
+    if($branches.edges) { 
+        foreach($edge in $branches.edges) { 
+            if($null -ne $edge) { $edges.Add($edge) } 
+        } 
+    }
 
     Write-Host "[*] Enumerating Organization Environments"
     $environments = $repos | Git-HoundEnvironment -Session $Session
-    if($environments.nodes) { $nodes.AddRange(@($environments.nodes)) }
-    if($environments.edges) { $edges.AddRange(@($environments.edges)) }
+    if($environments.nodes) { 
+        foreach($node in $environments.nodes) { 
+            if($null -ne $node) { $nodes.Add($node) } 
+        } 
+    }
+    if($environments.edges) { 
+        foreach($edge in $environments.edges) { 
+            if($null -ne $edge) { $edges.Add($edge) } 
+        } 
+    }
 
     if($EnableFederation){
         Write-Host "[*] Enumerating Azure Federation"
@@ -1979,24 +2116,56 @@ function Invoke-GitHound
             $federationParams.ClientSecret = $ClientSecret
         }
         $federation = Git-HoundFederation @federationParams
-        if($federation.nodes) { $nodes.AddRange(@($federation.nodes)) }
-        if($federation.edges) { $edges.AddRange(@($federation.edges)) }
+        if($federation.nodes) { 
+            foreach($node in $federation.nodes) { 
+                if($null -ne $node) { $nodes.Add($node) } 
+            } 
+        }
+        if($federation.edges) { 
+            foreach($edge in $federation.edges) { 
+                if($null -ne $edge) { $edges.Add($edge) } 
+            } 
+        }
     }
         
     Write-Host "[*] Enumerating Team Roles"
     $teamroles = $org | Git-HoundTeamRole -Session $Session
-    if($teamroles.nodes) { $nodes.AddRange(@($teamroles.nodes)) }
-    if($teamroles.edges) { $edges.AddRange(@($teamroles.edges)) }
+    if($teamroles.nodes) { 
+        foreach($node in $teamroles.nodes) { 
+            if($null -ne $node) { $nodes.Add($node) } 
+        } 
+    }
+    if($teamroles.edges) { 
+        foreach($edge in $teamroles.edges) { 
+            if($null -ne $edge) { $edges.Add($edge) } 
+        } 
+    }
 
     Write-Host "[*] Enumerating Organization Roles"
     $orgroles = $org | Git-HoundOrganizationRole -Session $Session
-    if($orgroles.nodes) { $nodes.AddRange(@($orgroles.nodes)) }
-    if($orgroles.edges) { $edges.AddRange(@($orgroles.edges)) }
+    if($orgroles.nodes) { 
+        foreach($node in $orgroles.nodes) { 
+            if($null -ne $node) { $nodes.Add($node) } 
+        } 
+    }
+    if($orgroles.edges) { 
+        foreach($edge in $orgroles.edges) { 
+            if($null -ne $edge) { $edges.Add($edge) } 
+        } 
+    }
 
     Write-Host "[*] Enumerating Repository Roles"
     $reporoles = $org | Git-HoundRepositoryRole -Session $Session
-    if($reporoles.nodes) { $nodes.AddRange(@($reporoles.nodes)) }
-    if($reporoles.edges) { $edges.AddRange(@($reporoles.edges)) }
+    if($reporoles.nodes) { 
+        foreach($node in $reporoles.nodes) { 
+            if($null -ne $node) { $nodes.Add($node) } 
+        } 
+    }
+    if($reporoles.edges) { 
+        foreach($edge in $reporoles.edges) { 
+            if($null -ne $edge) { $edges.Add($edge) } 
+        } 
+    }
     
     # Write-Host "[*] Enumerating Secret Scanning Alerts"
     # $secretalerts = $org | Git-HoundSecretScanningAlert -Session $Session
@@ -2005,16 +2174,37 @@ function Invoke-GitHound
 
     Write-Host "[*] Enumerating SAML Identity Provider"
     $saml = Git-HoundGraphQlSamlProvider -Session $Session
-    if($saml) { $edges.AddRange(@($saml)) }
+    if($saml) { 
+        foreach($edge in $saml) { 
+            if($null -ne $edge) { $edges.Add($edge) } 
+        } 
+    }
 
     Write-Host "[*] Converting to OpenGraph JSON Payload"
+    
+    # Convert ConcurrentBag to arrays in a thread-safe manner
+    $nodeArray = @()
+    $edgeArray = @()
+    
+    foreach($node in $nodes) {
+        if($null -ne $node) {
+            $nodeArray += $node
+        }
+    }
+    
+    foreach($edge in $edges) {
+        if($null -ne $edge) {
+            $edgeArray += $edge
+        }
+    }
+    
     $payload = [PSCustomObject]@{
         metadata = [PSCustomObject]@{
            # source_kind = "GHBase"
         }
         graph = [PSCustomObject]@{
-            nodes = $nodes.ToArray()
-            edges = $edges.ToArray()
+            nodes = $nodeArray
+            edges = $edgeArray
         }
     } | ConvertTo-Json -Depth 10 | Out-File -FilePath "./output/githound.json"
 
