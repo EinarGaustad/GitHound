@@ -296,6 +296,29 @@ function New-GitHoundEdge
         #>
     )
 
+    # Validation for null or blank values
+    $hasErrors = $false
+    
+    if ([string]::IsNullOrWhiteSpace($Kind)) {
+        Write-Warning "Edge creation failed - Kind is null or blank. StartId: '$StartId', EndId: '$EndId', Properties: $($Properties | ConvertTo-Json -Compress)"
+        $hasErrors = $true
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($StartId)) {
+        Write-Warning "Edge creation failed - StartId is null or blank. Kind: '$Kind', EndId: '$EndId', Properties: $($Properties | ConvertTo-Json -Compress)"
+        $hasErrors = $true
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($EndId)) {
+        Write-Warning "Edge creation failed - EndId is null or blank. Kind: '$Kind', StartId: '$StartId', Properties: $($Properties | ConvertTo-Json -Compress)"
+        $hasErrors = $true
+    }
+    
+    # If any validation failed, return null instead of creating an invalid edge
+    if ($hasErrors) {
+        return $null
+    }
+
     $edge = [PSCustomObject]@{
         kind = $Kind
         start = [PSCustomObject]@{
@@ -1797,7 +1820,7 @@ function Git-HoundFederation {
                                         organization_id = $Organization.properties.node_id
                                         shadow = $true
                                     }
-                                    $null = $nodes.Add((New-GitHoundNode -Id $shadowEnvId -Kind 'ShadowEnvironment' -Properties $shadowEnvProps))
+                                    $null = $nodes.Add((New-GitHoundNode -Id $shadowEnvId -Kind 'GHShadowEnvironment' -Properties $shadowEnvProps))
                                     $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasEnvironment' -StartId $matchingRepo.id -EndId $shadowEnvId))
                                     $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $shadowEnvId -EndId $app.appId  -Properties $edgeProperties))
                                 }
