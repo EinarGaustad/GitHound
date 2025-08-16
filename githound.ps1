@@ -300,17 +300,17 @@ function New-GitHoundEdge
     $hasErrors = $false
     
     if ([string]::IsNullOrWhiteSpace($Kind)) {
-        Write-Warning "Edge creation failed - Kind is null or blank. StartId: '$StartId', EndId: '$EndId', Properties: $($Properties | ConvertTo-Json -Compress)"
+        Write-Host "ERROR: Edge creation failed - Kind is null or blank. StartId: '$StartId', EndId: '$EndId', Properties: $($Properties | ConvertTo-Json -Compress)" -ForegroundColor Red
         $hasErrors = $true
     }
     
     if ([string]::IsNullOrWhiteSpace($StartId)) {
-        Write-Warning "Edge creation failed - StartId is null or blank. Kind: '$Kind', EndId: '$EndId', Properties: $($Properties | ConvertTo-Json -Compress)"
+        Write-Host "ERROR: Edge creation failed - StartId is null or blank. Kind: '$Kind', EndId: '$EndId', Properties: $($Properties | ConvertTo-Json -Compress)" -ForegroundColor Red
         $hasErrors = $true
     }
     
     if ([string]::IsNullOrWhiteSpace($EndId)) {
-        Write-Warning "Edge creation failed - EndId is null or blank. Kind: '$Kind', StartId: '$StartId', Properties: $($Properties | ConvertTo-Json -Compress)"
+        Write-Host "ERROR: Edge creation failed - EndId is null or blank. Kind: '$Kind', StartId: '$StartId', Properties: $($Properties | ConvertTo-Json -Compress)" -ForegroundColor Red
         $hasErrors = $true
     }
     
