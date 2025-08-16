@@ -1562,7 +1562,7 @@ query SAML($login: String!, $count: Int = 100, $after: String = null) {
 function Git-HoundAppRegs {
     Write-Host "Fetching application registrations..." -ForegroundColor Green
     $allApps = @()
-    $uri = "https://graph.microsoft.com/v1.0/applications"
+    $uri = "https://graph.microsoft.com/v1.0/applications?`$top=30"
     
     do {
         try {
@@ -1578,7 +1578,7 @@ function Git-HoundAppRegs {
             Write-Error "Failed to fetch applications: $($_.Exception.Message)"
             break
         }
-    } while ($uri)
+    } while ($uri -and $allApps.Count -lt 30)
     
     Write-Host "Found $($allApps.Count) application registrations" -ForegroundColor Yellow
     return $allApps
