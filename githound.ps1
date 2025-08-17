@@ -73,7 +73,7 @@ function New-GithubAppSession {
 
         [Parameter(Position=2, Mandatory = $false)]
         [string]
-        $PrivateKeyPath = './priv.pem'
+        $PrivateKeyPath = '../priv.pem'
     )
 
     $header = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @{
@@ -914,6 +914,8 @@ function Git-HoundEnvironment {
                         $envProps = [pscustomobject]@{
                             name = Normalize-Null $env.name
                             repository_full_name = Normalize-Null $repo.properties.full_name
+                            organization = Normalize-Null $repo.properties.organization_name
+                            organization_id = Normalize-Null $repo.properties.organization_id
                             created_at = Normalize-Null $env.created_at
                             updated_at = Normalize-Null $env.updated_at
                             
