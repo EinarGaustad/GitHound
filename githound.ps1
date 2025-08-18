@@ -800,9 +800,9 @@ function Git-HoundBranch
                     protected       = Normalize-Null $branch.protected
                 }
 
-                #foreach ($BranchProtectionProperty in $BranchProtectionProperties.GetEnumerator()) {
-                #    $props | Add-Member -MemberType NoteProperty -Name $BranchProtectionProperty.Key -Value $BranchProtectionProperty.Value
-                #}
+                foreach ($BranchProtectionProperty in $BranchProtectionProperties.GetEnumerator()) {
+                    $props | Add-Member -MemberType NoteProperty -Name $BranchProtectionProperty.Key -Value $BranchProtectionProperty.Value
+                }
 
                 $null = $nodes.Add((New-GitHoundNode -Id $branchHash -Kind GHBranch -Properties $props))
                 $null = $edges.Add((New-GitHoundEdge -Kind GHHasBranch -StartId $repo.id -EndId $branchHash))
