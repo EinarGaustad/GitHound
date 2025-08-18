@@ -1878,11 +1878,11 @@ function Git-HoundFederation {
                                     $null = $edges.Add((New-GitHoundEdge -Kind 'GHHasBranch' -StartId $matchingRepo.id -EndId $branchHash))
                                     $null = $edges.Add((New-GitHoundEdge -Kind 'GHFederatedTo' -StartId $branchHash -EndId $app.appId -Properties $edgeProperties))
                                 }
-                            } elseif ($subjectInfo.Type -eq "Environment") {
+                                } elseif ($subjectInfo.Type -eq "Environment") {
                                 # Look for matching environment
                                 $matchingEnvironment = $Environments.nodes | Where-Object { 
                                     $_.properties.name -eq $subjectInfo.Details -and 
-                                    $_.properties.repository_name -eq $subjectInfo.Repository
+                                    $_.properties.repository_full_name -eq "$($subjectInfo.Organization)/$($subjectInfo.Repository)"
                                 }
                                 
                                 if ($matchingEnvironment) {
