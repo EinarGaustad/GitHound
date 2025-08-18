@@ -1671,9 +1671,6 @@ function Git-HoundAppRegs {
             $response = Invoke-GraphRequest -Uri $uri
             $allApps += $response.value
             $uri = $response.'@odata.nextLink'
-            
-            # Rate limiting
-            Start-Sleep -Milliseconds 1000
 
         }
         catch {
@@ -1965,8 +1962,6 @@ function Git-HoundFederation {
                 $githubApps += $appInfo
             }
             
-            # Rate limiting
-            Start-Sleep -Milliseconds 500
         }
 
         # Display summary
@@ -2179,7 +2174,7 @@ function Invoke-GitHound
     
     $payload = [PSCustomObject]@{
         metadata = [PSCustomObject]@{
-           # source_kind = "GHBase"
+            source_kind = "GHBase"
         }
         graph = [PSCustomObject]@{
             nodes = $nodeArray
