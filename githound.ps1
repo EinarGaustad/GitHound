@@ -1651,6 +1651,19 @@ query SAML($login: String!, $count: Int = 100, $after: String = null) {
                     }
                 }
             }
+            'https://sts.windows.net/*' {
+                # This is to catch the Entra SSO cases, I just currently don't have an example of the issuer string
+                foreach($identity in $result.data.organization.samlIdentityProvider.externalIdentities.nodes)
+                {
+                    foreach($attribute in $identity.samlIdentity.attributes)
+                    {
+                        if($attribute.name -eq 'http://schemas.microsoft.com/identity/claims/objectidentifier')
+                        {
+                            $null = $edges.Add((New-GitHoundEdge -Kind SyncedToGHUser -StartId $attribute.value -EndId $identity.user.id))
+                        }
+                    }
+                }
+            }
             default { Write-Verbose "Issue: $($_)" }
         }
 
@@ -1999,6 +2012,10 @@ function Invoke-GitHound
         $EnableFederation,
 
         [Parameter()]
+        [switch]
+        $EnableSync,
+
+        [Parameter()]
         [string]$TenantId,
         
         [Parameter()]
@@ -2011,7 +2028,10 @@ function Invoke-GitHound
     # Use thread-safe collections for concurrent access
     $edges = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
     $nodes = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
-
+    
+    # Edges for crossing bloodhound types 
+    $edgesCross = [System.Collections.Concurrent.ConcurrentBag[object]]::new() 
+    
     Write-Host "[*] Starting Git-Hound for $($Session.OrganizationName)"
     $org = Git-HoundOrganization -Session $Session
     $nodes.Add($org)
@@ -2059,6 +2079,7 @@ function Invoke-GitHound
     }
     if($branches.edges) { 
         foreach($edge in $branches.edges) { 
+            
             if($null -ne $edge) { $edges.Add($edge) } 
         } 
     }
@@ -2097,7 +2118,7 @@ function Invoke-GitHound
         }
         if($federation.edges) { 
             foreach($edge in $federation.edges) { 
-                if($null -ne $edge) { $edges.Add($edge) } 
+                if($null -ne $edge) { $edgesCross.Add($edge) } 
             } 
         }
     }
@@ -2146,12 +2167,14 @@ function Invoke-GitHound
     # if($secretalerts.nodes) { $nodes.AddRange(@($secretalerts.nodes)) }
     # if($secretalerts.edges) { $edges.AddRange(@($secretalerts.edges)) }
 
-    Write-Host "[*] Enumerating SAML Identity Provider"
-    $saml = Git-HoundGraphQlSamlProvider -Session $Session
-    if($saml) { 
-        foreach($edge in $saml) { 
-            if($null -ne $edge) { $edges.Add($edge) } 
-        } 
+    if($EnableSync){
+        Write-Host "[*] Enumerating SAML Identity Provider"
+        $saml = Git-HoundGraphQlSamlProvider -Session $Session
+        if($saml) { 
+            foreach($edge in $saml) { 
+                if($null -ne $edge) { $edgesCross.Add($edge) } 
+            } 
+        }
     }
 
     Write-Host "[*] Converting to OpenGraph JSON Payload"
@@ -2180,7 +2203,26 @@ function Invoke-GitHound
             nodes = $nodeArray
             edges = $edgeArray
         }
-    } | ConvertTo-Json -Depth 10 | Out-File -FilePath "./output/githound.json"
+    } | ConvertTo-Json -Depth 10 | Out-File -FilePath "./output/githound-ghbase.json"
+
+    # Convert ConcurrentBag to arrays in a thread-safe manner
+    $edgeArrayCross = @()
+    
+    foreach($edge in $edgesCross) {
+        if($null -ne $edge) {
+            $edgeArrayCross += $edge
+        }
+    }
+
+    
+    $payloadCross = [PSCustomObject]@{
+        metadata = [PSCustomObject]@{
+        }
+        graph = [PSCustomObject]@{
+            edges = $edgeArrayCross
+        }
+    } | ConvertTo-Json -Depth 10 | Out-File -FilePath "./output/githound-cross.json"
+
 
     #$payload | BHDataUploadJSON
 }
