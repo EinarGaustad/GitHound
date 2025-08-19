@@ -2016,6 +2016,10 @@ function Invoke-GitHound
         $EnableSync,
 
         [Parameter()]
+        [switch]
+        $EnableCrossNode,
+
+        [Parameter()]
         [string]$TenantId,
         
         [Parameter()]
@@ -2215,14 +2219,15 @@ function Invoke-GitHound
     }
 
     
-    $payloadCross = [PSCustomObject]@{
-        metadata = [PSCustomObject]@{
-        }
-        graph = [PSCustomObject]@{
-            edges = $edgeArrayCross
-        }
-    } | ConvertTo-Json -Depth 10 | Out-File -FilePath "./output/githound-cross.json"
-
+    if($EnableCrossNode){
+        $payloadCross = [PSCustomObject]@{
+            metadata = [PSCustomObject]@{
+            }
+            graph = [PSCustomObject]@{
+                edges = $edgeArrayCross
+            }
+        } | ConvertTo-Json -Depth 10 | Out-File -FilePath "./output/githound-cross.json"
+    }
 
     #$payload | BHDataUploadJSON
 }
