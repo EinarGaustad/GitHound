@@ -1786,15 +1786,42 @@ function Git-HoundFederation {
     $nodes = New-Object System.Collections.ArrayList
     $edges = New-Object System.Collections.ArrayList
 
-    # Azure authentication with conditional logic
-    if ($ClientId) {
-        # Use Azure App Registration authentication
-        Write-Host "Getting access token using Azure App Registration..." -ForegroundColor Green
+ if ($env:AZURE_FEDERATED_TOKEN_FILE -and $env:AZURE_CLIENT_ID -and $env:AZURE_TENANT_ID) {
+        Write-Host "Attempting Workload Identity authentication..." -ForegroundColor Cyan
         
-        # Validate required parameters for app registration
-        if (-not $TenantId -or -not $ClientSecret) {
-            throw "When using ClientId, both TenantId and ClientSecret are required."
+        try {
+            $tokenFile = $env:AZURE_FEDERATED_TOKEN_FILE
+            $clientId = $env:AZURE_CLIENT_ID
+            $tenantId = $env:AZURE_TENANT_ID
+            
+            if (Test-Path $tokenFile) {
+                $federatedToken = Get-Content $tokenFile -Raw
+                $tokenUri = "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token"
+                
+                $body = @{
+                    client_id = $clientId
+                    client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+                    client_assertion = $federatedToken
+                    scope = "https://graph.microsoft.com/.default"
+                    grant_type = "client_credentials"
+                }
+                
+                $response = Invoke-RestMethod -Uri $tokenUri -Method POST -Body $body -ContentType "application/x-www-form-urlencoded"
+                $accessToken = $response.access_token
+                
+                if ($accessToken) {
+                    Write-Host "Successfully authenticated using Azure Workload Identity" -ForegroundColor Green
+                }
+            }
         }
+        catch {
+            Write-Verbose "Workload Identity authentication failed: $($_.Exception.Message)"
+            $accessToken = $null
+        }
+    }
+    
+    if (-not $accessToken -and $ClientId -and $TenantId -and $ClientSecret) {
+        Write-Host "Attempting Client Secret authentication..." -ForegroundColor Cyan
         
         try {
             $tokenUri = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
@@ -1804,38 +1831,51 @@ function Git-HoundFederation {
                 scope = "https://graph.microsoft.com/.default"
                 grant_type = "client_credentials" 
             }
-            $accessToken = (Invoke-RestMethod -Uri $tokenUri -Method POST -Body $body -ContentType "application/x-www-form-urlencoded").access_token
+            $response = Invoke-RestMethod -Uri $tokenUri -Method POST -Body $body -ContentType "application/x-www-form-urlencoded"
+            $accessToken = $response.access_token
 
-            if (-not $accessToken) {
-                throw "Failed to get access token from app registration."
+            if ($accessToken) {
+                Write-Host "Successfully authenticated using Azure App Registration" -ForegroundColor Green
             }
-            
-            Write-Host "Successfully authenticated using Azure App Registration" -ForegroundColor Green
         }
         catch {
-            Write-Error "Azure App Registration authentication failed: $($_.Exception.Message)"
-            throw "Failed to authenticate with app registration. Please verify TenantId, ClientId, and ClientSecret."
+            Write-Verbose "Azure App Registration authentication failed: $($_.Exception.Message)"
+            $accessToken = $null
         }
     }
-    else {
-        # Use Azure CLI authentication (fallback)
-        Write-Host "Getting access token from Azure CLI..." -ForegroundColor Green
+    elseif (-not $accessToken -and ($ClientId -or $TenantId -or $ClientSecret)) {
+        Write-Warning "Incomplete client credentials provided. ClientId, TenantId, and ClientSecret are all required for app registration authentication."
+    }
+    
+    # 3. Fall back to Azure CLI if previous methods failed
+    if (-not $accessToken) {
+        Write-Host "Attempting Azure CLI authentication..." -ForegroundColor Cyan
         
         try {
-            $accessToken = az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv
+            # Check if Azure CLI is available
+            $azCommand = Get-Command az -ErrorAction SilentlyContinue
+            if ($azCommand) {
+                $accessToken = az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>$null
 
-            if (-not $accessToken) {
-                throw "Azure CLI returned empty token."
+                if ($accessToken -and $accessToken -ne "null" -and ![string]::IsNullOrWhiteSpace($accessToken)) {
+                    Write-Host "Successfully authenticated using Azure CLI" -ForegroundColor Green
+                } else {
+                    $accessToken = $null
+                }
             }
-            
-            Write-Host "Successfully authenticated using Azure CLI" -ForegroundColor Green
         }
         catch {
-            Write-Error "Azure CLI authentication failed: $($_.Exception.Message)"
-            throw "Failed to get access token from Azure CLI. Please run 'az login' first or provide ClientId/ClientSecret parameters."
+            Write-Verbose "Azure CLI authentication failed: $($_.Exception.Message)"
+            $accessToken = $null
         }
     }
-
+    
+    if (-not $accessToken) {
+        $errorMessage = @"
+All Azure authentication methods failed. 
+"@
+        throw $errorMessage
+    }
 
     try {
         $allAppRegs = Git-HoundAppRegs
